@@ -1,0 +1,12 @@
+{
+  "unique_identifier": "device_status",
+  "name": "Device Status",
+  "author": "Astral Forge",
+  "version": "1",
+  "interpreter": "",
+  "metadata_file": "",
+  "binary_path": "device_status.elf",
+  "source": 1
+}
+
+

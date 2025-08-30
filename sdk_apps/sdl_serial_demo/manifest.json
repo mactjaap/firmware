@@ -1,0 +1,10 @@
+{
+    "unique_identifier": "sdl_serial_demo",
+    "name": "SDL Serial Demo",
+    "author": "Tjaap",
+    "version": "2",
+    "interpreter": "",
+    "metadata_file": "",
+    "binary_path": "sdl_serial_demo.elf",
+    "source": 1
+}

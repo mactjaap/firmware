@@ -132,6 +132,20 @@ endfunction()
 #     thirdparty/microui.c
 #)
 
+
+# MINIBROWSER
+build_app(mini_browser PREINSTALL
+    SOURCES
+     mini_browser.c
+    LIBRARIES
+     sdl3
+)
+
+
+
+
+
+
 # Current updater app
 build_app(why2025_ota PREINSTALL
     SOURCES
@@ -139,6 +153,14 @@ build_app(why2025_ota PREINSTALL
      window.c
      ota_update.c
      thirdparty/cJSON.c
+    LIBRARIES
+     sdl3
+)
+
+# my first test app
+build_app(sdl_serial_demo PREINSTALL
+    SOURCES
+     sdl_serial_demo.c
     LIBRARIES
      sdl3
 )
@@ -159,6 +181,7 @@ build_app(badgevms_settings PREINSTALL
 # Regular apps
 #
 
+
 build_app(why2025_sponsors PREINSTALL
     SOURCES
      main.c
@@ -171,7 +194,7 @@ build_app(why2025_namebadge PREINSTALL
      image.c
 )
 
-build_app(doomgeneric
+build_app(doomgeneric PREINSTALL
     SOURCES
      doomgeneric/am_map.c
      doomgeneric/d_event.c
@@ -263,7 +286,7 @@ build_app(doomgeneric
 # Diagnostic apps
 #
 
-build_app(hardware_test
+build_app(hardware_test PREINSTALL
     SOURCES
      thirdparty/microui.c
      test_badge.c
@@ -296,7 +319,7 @@ build_app(bmi270_test
      bmi270_test.c
 )
 
-build_app(curl_test
+build_app(curl_test PREINSTALL
     SOURCES
      curl_test.c
 )
@@ -339,10 +362,18 @@ build_app(thread_test
      main.c
 )
 
-build_app(wifi_test
+build_app(wifi_test PREINSTALL
     SOURCES
      wifi_test.c
 )
 
+
 get_property(SDK_APP_ELFS GLOBAL PROPERTY SDK_APP_ELFS)
 add_custom_target(sdk_app_build_all ALL DEPENDS ${SDK_APP_ELFS})
+
+#build_app(mini_browser PREINSTALL
+#    SOURCES
+#     mini_browser.c
+#    LIBRARIES
+#     sdl3
+#)
