@@ -252,6 +252,30 @@ static void icon_settings(Launcher_Context *ctx, int x, int y, int sz, bool sele
     draw_circle_filled(ctx, cx, cy, r/2, COL_PANEL);
 }
 
+static void icon_settings2(Launcher_Context *ctx, int x, int y, int sz, bool selected) {
+    int r = sz/3;
+    int cx = x + sz/2;
+    int cy = y + sz/2;
+    uint32_t c1 = selected ? COL_ACCENT_2 : COL_ACCENT;
+    uint32_t c2 = COL_TEXT;
+
+    /* 8 spokes at fixed integer directions (no trig) */
+    const int dirs[8][2] = {
+        { 1, 0}, { 1, 1}, { 0, 1}, {-1, 1},
+        {-1, 0}, {-1,-1}, { 0,-1}, { 1,-1}
+    };
+    for (int i = 0; i < 8; ++i) {
+        int dx = dirs[i][0], dy = dirs[i][1];
+        int x1 = cx + dx * (r + 2);
+        int y1 = cy + dy * (r + 2);
+        int x2 = cx + dx * (r + 6);
+        int y2 = cy + dy * (r + 6);
+        draw_line(ctx, x1, y1, x2, y2, c2);
+    }
+    draw_circle_filled(ctx, cx, cy, r, c1);
+    draw_circle_filled(ctx, cx, cy, r/2, COL_PANEL);
+}
+
 static void icon_wifi(Launcher_Context *ctx, int x, int y, int sz, bool selected) {
     uint32_t c = selected ? COL_ACCENT : COL_ACCENT_2;
     int cx = x + sz/2;
@@ -325,7 +349,7 @@ static void draw_app_icon(Launcher_Context *ctx, const char *uid, int x, int y, 
     if (strstr(uid, "hardware"))          { icon_chip(ctx,     x, y, sz, selected); return; }
     if (strstr(uid, "hello"))             { icon_hello(ctx,    x, y, sz, selected); return; }
     if (strstr(uid, "sponsors"))          { icon_star(ctx,     x, y, sz, selected); return; }
-    if (strstr(uid, "ota"))               { icon_settings(ctx, x, y, sz, selected); return; }
+    if (strstr(uid, "ota"))               { icon_settings2(ctx, x, y, sz, selected); return; }
     icon_chip(ctx, x, y, sz, selected);
 }
 
