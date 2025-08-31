@@ -53,6 +53,7 @@ typedef struct {
     int             items_per_page;
     bool            show_about;
     bool            quit;
+    int             about_index;     /* which app the About sheet shows (-1 if none) */
 } Launcher_Context;
 
 /* ===========================================================
@@ -259,7 +260,6 @@ static void icon_settings2(Launcher_Context *ctx, int x, int y, int sz, bool sel
     uint32_t c1 = selected ? COL_ACCENT_2 : COL_ACCENT;
     uint32_t c2 = COL_TEXT;
 
-    /* 8 spokes at fixed integer directions (no trig) */
     const int dirs[8][2] = {
         { 1, 0}, { 1, 1}, { 0, 1}, {-1, 1},
         {-1, 0}, {-1,-1}, { 0,-1}, { 1,-1}
@@ -326,7 +326,6 @@ static void icon_plug(Launcher_Context *ctx, int x, int y, int sz, bool selected
 static void icon_star(Launcher_Context *ctx, int x, int y, int sz, bool selected) {
     uint32_t c = selected ? COL_ACCENT_3 : COL_ACCENT;
     int cx = x + sz/2, cy = y + sz/2, r = sz/3;
-    /* 5-point star using fixed endpoints (no trig): connect a pentagram pattern */
     int px[5] = { cx, cx + r, cx + r/3, cx - r/3, cx - r };
     int py[5] = { cy - r, cy - r/3, cy + r, cy + r, cy - r/3 };
     for (int i = 0; i < 5; ++i) {
@@ -371,7 +370,7 @@ static void draw_window(Launcher_Context *ctx) {
     draw_title_bar(ctx, wx + 2, wy + 2, ww - 4, th, "WHY Launcher");
 
     char info[64];
-    snprintf(info, sizeof(info), "Use \x18/\x19 to navigate  Enter: Launch  A: About  ESC: Exit");
+    snprintf(info, sizeof(info), "Use \x18/\x19 to navigate  Enter: Launch  A: About app  ESC: Exit");
     draw_text(ctx, wx + 16, wy + th + 16, info, COL_TEXT_MID);
 
     const int list_y = wy + th + 44;
@@ -444,20 +443,35 @@ static void draw_window(Launcher_Context *ctx) {
 }
 
 /* ===========================================================
-   About dialog
+   About dialog (per selected app)
    =========================================================== */
-static void draw_about(Launcher_Context *ctx) {
-    int w = 460, h = 300;
+static void draw_about(Launcher_Context *ctx, application_t *app) {
+    int w = 520, h = 320;
     int x = (SCREEN_WIDTH  - w)/2;
     int y = (SCREEN_HEIGHT - h)/2;
 
-    draw_rect(ctx, x-4, y-4, w+8, h+8, COL_BG);
+    draw_rect(ctx, x-6, y-6, w+12, h+12, COL_BG);
     draw_card(ctx, x, y, w, h);
     draw_title_bar(ctx, x + 2, y + 2, w - 4, 42, "About");
 
-    draw_text_center(ctx, x, y + 80, w, "BadgeVMS Launcher", COL_TEXT);
-    draw_text_center(ctx, x, y + 110, w, "Colorful edition for WHY2025", COL_TEXT_MID);
-    draw_text_center(ctx, x, y + 170, w, "ENTER or ESC to close", COL_TEXT_MID);
+    const char *name = (app && app->name) ? app->name : "(unknown)";
+    const char *ver  = (app && app->version && app->version[0]) ? app->version : "-";
+    const char *uid  = (app && app->unique_identifier) ? app->unique_identifier : "-";
+    const char *bin  = (app && app->binary_path && app->binary_path[0]) ? app->binary_path : "-";
+
+    char line[256];
+    draw_text_center(ctx, x, y + 78,  w, name, COL_TEXT);
+
+    snprintf(line, sizeof(line), "Version: %s", ver);
+    draw_text_center(ctx, x, y + 110, w, line, COL_TEXT_MID);
+
+    snprintf(line, sizeof(line), "UID: %s", uid);
+    draw_text_center(ctx, x, y + 138, w, line, COL_TEXT_MID);
+
+    snprintf(line, sizeof(line), "Binary: %s", bin);
+    draw_text_center(ctx, x, y + 166, w, line, COL_TEXT_MID);
+
+    draw_text_center(ctx, x, y + 220, w, "ENTER or ESC to close", COL_TEXT_MID);
 }
 
 /* ===========================================================
@@ -466,7 +480,8 @@ static void draw_about(Launcher_Context *ctx) {
 static void handle_keyboard(Launcher_Context *ctx, keyboard_scancode_t code) {
     if (ctx->show_about) {
         if (code == KEY_SCANCODE_ESCAPE || code == KEY_SCANCODE_RETURN || code == KEY_SCANCODE_SPACE) {
-            ctx->show_about = false;
+            ctx->show_about  = false;
+            ctx->about_index = -1;
         }
         return;
     }
@@ -497,7 +512,8 @@ static void handle_keyboard(Launcher_Context *ctx, keyboard_scancode_t code) {
             break;
 
         case KEY_SCANCODE_A:
-            ctx->show_about = true;
+            ctx->about_index = ctx->selected_item;  /* show About for selected app */
+            ctx->show_about  = true;
             break;
 
         case KEY_SCANCODE_ESCAPE:
@@ -526,6 +542,7 @@ static bool run_launcher(application_t **apps, size_t num) {
     Launcher_Context ctx = (Launcher_Context){0};
     ctx.applications  = apps;
     ctx.total_items   = (int)num;
+    ctx.about_index   = -1;
 
     ctx.window = window_create(
         "Application Launcher",
@@ -541,13 +558,16 @@ static bool run_launcher(application_t **apps, size_t num) {
 
     ctx.pixels = ctx.framebuffer->pixels;
 
-    
-        while (!ctx.quit) {
+    while (!ctx.quit) {
         memset(ctx.pixels, 0, SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(uint16_t));
 
         draw_window(&ctx);
         if (ctx.show_about) {
-            draw_about(&ctx);
+            application_t *a = NULL;
+            if (ctx.about_index >= 0 && ctx.about_index < ctx.total_items) {
+                a = ctx.applications[ctx.about_index];
+            }
+            draw_about(&ctx, a);
         }
 
         window_present(ctx.window, true, NULL, 0);
@@ -559,8 +579,6 @@ static bool run_launcher(application_t **apps, size_t num) {
             handle_keyboard(&ctx, e.keyboard.scancode);
         }
     }
-
-
 
     return true;
 }
