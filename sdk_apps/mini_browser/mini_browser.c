@@ -1,11 +1,11 @@
 #include "badgevms/wifi.h"
 #include "curl/curl.h"
 #include <SDL3/SDL.h>
+#include <ctype.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
-#include <stdbool.h>
 
 /* ---------- Limits & layout ---------- */
 #define MAX_BYTES     (16 * 1024)
@@ -19,6 +19,24 @@
 #define URLBAR_H      24
 #define LINE_SPACING  2
 #define MAX_LINKS     128
+
+/* ---------- Home + special-key targets ---------- */
+#define HOME_URL          "http://bit.ly/4n6t9aO"
+#define SPECIAL_URL_124   "https://text.npr.org"
+#define SPECIAL_URL_125   "https://news.ycombinator.com/"
+#define SPECIAL_URL_126   "http://www.textfiles.com/"
+#define SPECIAL_URL_127   "https://en.m.wikipedia.org/"
+#define SPECIAL_URL_128   "https://ohmeadhbh.github.io/bobcat/"
+#define SPECIAL_URL_129   "https://greycoder.com/a-list-of-text-only-new-sites/"
+
+/* ---------- Accelerator + special scancodes ---------- */
+#define SC_ACCELERATOR    ((SDL_Scancode)0xE3)  /* your keyboard's special key */
+#define SC_SPECIAL_124    ((SDL_Scancode)0x124)
+#define SC_SPECIAL_125    ((SDL_Scancode)0x125)
+#define SC_SPECIAL_126    ((SDL_Scancode)0x126)
+#define SC_SPECIAL_127    ((SDL_Scancode)0x127)
+#define SC_SPECIAL_128    ((SDL_Scancode)0x128)
+#define SC_SPECIAL_129    ((SDL_Scancode)0x129)
 
 /* ---------- 5x7 bitmap font (ASCII 32..127) ---------- */
 static const unsigned char font5x7[96][5] = {
@@ -248,7 +266,7 @@ static const char *emit_entity(const char *h, char *out, size_t *o, size_t cap) 
     if      (!strncmp(h,"&amp;",5))  { if(*o<cap) out[(*o)++]='&';  return h+5; }
     else if (!strncmp(h,"&lt;",4))   { if(*o<cap) out[(*o)++]='<';  return h+4; }
     else if (!strncmp(h,"&gt;",4))   { if(*o<cap) out[(*o)++]='>';  return h+4; }
-    else if (!strncmp(h,"&quot;",6)) { if(*o<cap) out[(*o)++]='"';  return h+6; }
+    else if (!strncmp(h,"&quot;",6)) { if(*o<cap) out[(*o)++]='"'; return h+6; }
     else if (!strncmp(h,"&#39;",5))  { if(*o<cap) out[(*o)++]='\''; return h+5; }
     else if (!strncmp(h,"&nbsp;",6)) { if(*o<cap) out[(*o)++]=' ';  return h+6; }
     return NULL;
@@ -261,11 +279,10 @@ static int is_supported_href(const char *h) {
     if (!strncasecmp(h, "javascript:", 11)) return 0;
     if (!strncasecmp(h, "mailto:", 7)) return 0;
     if (!strncasecmp(h, "data:", 5)) return 0;
-    /* allow http(s), scheme-relative //, ?, /, and relatives */
-    return 1;
+    return 1; /* allow http(s) and relatives */
 }
 
-/* ---------- HTML -> page_t (collect links at OPEN tag, skip head/script/style) ---------- */
+/* ---------- HTML -> page_t ---------- */
 static page_t *html_to_page(const char *html, const char *base_url) {
     if (!html) return NULL;
     size_t L = strlen(html);
@@ -293,7 +310,6 @@ static page_t *html_to_page(const char *html, const char *base_url) {
             bool closing = false;
             if (i<L && html[i]=='/') { closing=true; i++; }
 
-            /* tag name */
             char tname[16]; int tn=0;
             while (i<L && tn<(int)sizeof(tname)-1 && isalpha((unsigned char)html[i])) {
                 tname[tn++] = (char)tolower((unsigned char)html[i]); i++;
@@ -310,9 +326,7 @@ static page_t *html_to_page(const char *html, const char *base_url) {
                 if (!strcmp(tname,"a")) {
                     char href_val[URL_MAX]; href_val[0]=0;
 
-                    /* attributes until '>' */
                     while (i<L && html[i] != '>') {
-                        /* attr name */
                         char aname[16]; int an=0;
                         while (i<L && isspace((unsigned char)html[i])) i++;
                         while (i<L && an<(int)sizeof(aname)-1 &&
@@ -393,7 +407,7 @@ static page_t *html_to_page(const char *html, const char *base_url) {
     return pg;
 }
 
-/* ---------- wrap text to columns (with whitespace collapse) ---------- */
+/* ---------- wrap text to columns ---------- */
 static char *wrap_text(const char *in, int max_cols) {
     if (!in) return NULL;
     size_t n = strlen(in);
@@ -402,7 +416,7 @@ static char *wrap_text(const char *in, int max_cols) {
 
     int col = 0;
     size_t o = 0;
-    int blank_run = 0;  /* track consecutive blank lines */
+    int blank_run = 0;
 
     for (size_t i = 0; i < n; i++) {
         char c = in[i];
@@ -410,7 +424,6 @@ static char *wrap_text(const char *in, int max_cols) {
 
         if (c == '\n') {
             if (col == 0) {
-                /* already at start of line -> avoid multiple blank lines */
                 if (blank_run) continue;
                 blank_run = 1;
             } else {
@@ -421,7 +434,7 @@ static char *wrap_text(const char *in, int max_cols) {
             continue;
         }
 
-        if (c == ' ' && (col == 0 || out[o-1] == ' ')) continue; /* collapse spaces */
+        if (c == ' ' && (col == 0 || out[o-1] == ' ')) continue;
 
         if (max_cols && col >= max_cols && c == ' ') {
             out[o++] = '\n'; col = 0; continue;
@@ -455,7 +468,7 @@ static int fetch_url(const char *url, mem_t *m) {
     return (res == CURLE_OK) ? 0 : (int)res;
 }
 
-/* ---------- UI (no yellow status line) ---------- */
+/* ---------- UI ---------- */
 static void draw_ui(SDL_Renderer *r, const char *bar_text) {
     if (!r) return;
     SDL_SetRenderDrawColor(r, 0, 0, 0, 255);
@@ -468,13 +481,11 @@ static void draw_ui(SDL_Renderer *r, const char *bar_text) {
     SDL_SetRenderDrawColor(r, 220, 220, 220, 255);
     draw_bar(r, bar_text);
 
-    /* thin separator */
     SDL_FRect mid = (SDL_FRect){0, URLBAR_H + 1, VIEW_W, 2};
     SDL_SetRenderDrawColor(r, 60, 60, 60, 255);
     SDL_RenderFillRect(r, &mid);
 }
 
-/* ---------- printable (ASCII) for URL input ---------- */
 static int is_printable_ascii(const char *text) {
     if (!text || !*text) return 0;
     unsigned char c = (unsigned char)text[0];
@@ -507,15 +518,17 @@ int main(void) {
     wifi_connect();
     curl_global_init(0);
 
-/*    char url_buf[URL_MAX] = "https://raw.githubusercontent.com/mactjaap/mini_browser/refs/heads/main/README.md"; */
-/*    https://urlvanish.com/c6c8ad3b                                                                               */
-    char url_buf[URL_MAX] = "https://urlvanish.com/c6c8ad3b";
+    char url_buf[URL_MAX] = HOME_URL;  /* New home page */
     char barline[URL_MAX + 64];
     char *content_wrapped = NULL;
     page_t *page = NULL;
     int  scroll_lines = 0;
     int  need_fetch = 1;
     int  sel_link = -1;
+
+    /* Accelerator + text-input suppression */
+    bool accel_down = false;           /* true while special key (0xE3) is held */
+    bool inhibit_text_once = false;    /* drop next TEXT_INPUT after handling a command */
 
     const int max_cols = (VIEW_W - 2*PAD_LR) / CH_W;
     const int lines_per_page = (VIEW_H - PAD_TOP - PAD_BOTTOM) / (CH_H + LINE_SPACING);
@@ -530,56 +543,57 @@ int main(void) {
     while (running) {
 
         if (need_fetch) {
-            /* sanitize */
             trim_inplace(url_buf);
-            if (!url_buf[0]) { need_fetch = 0; continue; }
-            if (!has_scheme(url_buf) && !(url_buf[0]=='/' && url_buf[1]=='/')) {
-                normalize_typed_url(url_buf);
-            }
-            if (url_buf[0]=='/' && url_buf[1]=='/') {
-                char sch[16]; scheme_from_url(page ? page->base : "https://example.org", sch, sizeof sch);
-                char tmp[URL_MAX]; snprintf(tmp, sizeof tmp, "%s:%s", sch, url_buf);
-                strncpy(url_buf, tmp, URL_MAX); url_buf[URL_MAX-1]=0;
-            }
-            if (!is_http_scheme(url_buf)) { /* skip unsupported schemes */
-                need_fetch = 0;
-            } else {
-                snprintf(barline, sizeof(barline), "%s", url_buf);
-                draw_ui(ren, barline);
-                SDL_RenderPresent(ren);
+            if (!url_buf[0]) { need_fetch = 0; }
+            else {
+                if (!has_scheme(url_buf) && !(url_buf[0]=='/' && url_buf[1]=='/')) {
+                    normalize_typed_url(url_buf);
+                }
+                if (url_buf[0]=='/' && url_buf[1]=='/') {
+                    char sch[16]; scheme_from_url(page ? page->base : "https://example.org", sch, sizeof sch);
+                    char tmp[URL_MAX]; snprintf(tmp, sizeof tmp, "%s:%s", sch, url_buf);
+                    strncpy(url_buf, tmp, URL_MAX); url_buf[URL_MAX-1]=0;
+                }
+                if (is_http_scheme(url_buf)) {
+                    snprintf(barline, sizeof(barline), "%s", url_buf);
+                    draw_ui(ren, barline);
+                    SDL_RenderPresent(ren);
 
-                mem_t m = {0};
-                int rc = fetch_url(url_buf, &m);
-                if (rc != 0) {
-                    printf("[mini_browser] fetch error %d URL='%s'\n", rc, url_buf);
-                    if (page) { free(page->text); free(page); page=NULL; }
-                    free(content_wrapped); content_wrapped=NULL;
-                    sel_link=-1;
-                } else {
-                    page_t *pg = html_to_page(m.buf ? m.buf : "", url_buf);
-                    if (!pg) {
+                    mem_t m = {0};
+                    int rc = fetch_url(url_buf, &m);
+                    if (rc != 0) {
+                        printf("[mini_browser] fetch error %d URL='%s'\n", rc, url_buf);
                         if (page) { free(page->text); free(page); page=NULL; }
                         free(content_wrapped); content_wrapped=NULL;
                         sel_link=-1;
                     } else {
-                        char *wrapped = wrap_text(pg->text, max_cols);
-                        free(content_wrapped); content_wrapped = wrapped;
-                        if (page) { free(page->text); free(page); }
-                        page = pg;
-                        scroll_lines = 0;
-                        sel_link = -1;
-                        printf("[mini_browser] parsed %d links from %s\n", page->link_count, url_buf);
-                        if (wrapped) {
-                            printf("\n--- BEGIN CONTENT ---\n%s\n--- END CONTENT ---\n", wrapped);
+                        page_t *pg = html_to_page(m.buf ? m.buf : "", url_buf);
+                        if (!pg) {
+                            if (page) { free(page->text); free(page); page=NULL; }
+                            free(content_wrapped); content_wrapped=NULL;
+                            sel_link=-1;
+                        } else {
+                            char *wrapped = wrap_text(pg->text, max_cols);
+                            free(content_wrapped); content_wrapped = wrapped;
+                            if (page) { free(page->text); free(page); }
+                            page = pg;
+                            scroll_lines = 0;
+                            sel_link = -1;
+                            printf("[mini_browser] parsed %d links from %s\n", page->link_count, url_buf);
+
+                            /* Dump wrapped content to serial */
+                            if (wrapped) {
+                                printf("\n--- CONTENT START ---\n%s\n--- CONTENT END ---\n", wrapped);
+                            }
                         }
                     }
+                    free(m.buf);
                 }
-                free(m.buf);
             }
             need_fetch = 0;
         }
 
-        /* Compose bar text: show selected link's URL if any, else the typed URL */
+        /* Compose bar text */
         if (page && sel_link >= 0 && sel_link < page->link_count) {
             snprintf(barline, sizeof(barline), "[%d/%d]  %s",
                      sel_link+1, page->link_count, page->links[sel_link].href);
@@ -615,7 +629,11 @@ int main(void) {
             if (ev.type == SDL_EVENT_QUIT) { running = 0; break; }
 
             if (ev.type == SDL_EVENT_TEXT_INPUT) {
-                const char *t = ev.text.text; /* UTF-8 subset, accept ASCII */
+                if (inhibit_text_once) {            /* swallow the next text input after a command */
+                    inhibit_text_once = false;
+                    continue;
+                }
+                const char *t = ev.text.text;       /* UTF-8 subset, accept ASCII */
                 if (is_printable_ascii(t)) {
                     size_t curlen = strlen(url_buf);
                     if (curlen < URL_MAX - 1) {
@@ -627,11 +645,98 @@ int main(void) {
             }
 
             if (ev.type == SDL_EVENT_KEY_DOWN) {
-                SDL_Keymod mods = ev.key.mod;
-                const bool ctrl = (mods & SDL_KMOD_CTRL) != 0;
-                const bool shift = (mods & SDL_KMOD_SHIFT) != 0;
+                SDL_Scancode sc = ev.key.scancode;
 
-                switch (ev.key.scancode) {
+                /* Track accelerator press/release */
+                if (sc == SC_ACCELERATOR) {
+                    accel_down = true;
+                    inhibit_text_once = true; /* avoid stray text if this key emits any */
+                    continue;
+                }
+
+                /* Special one-shot keys -> direct navigate. Top of WHY2025 badge keyboard  [] /\ X O & <>  */
+                if (sc == SC_SPECIAL_124) {
+                    strncpy(url_buf, SPECIAL_URL_124, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }
+                if (sc == SC_SPECIAL_125) {
+                    strncpy(url_buf, SPECIAL_URL_125, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }
+                if (sc == SC_SPECIAL_126) {
+                    strncpy(url_buf, SPECIAL_URL_126, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }       
+                if (sc == SC_SPECIAL_127) {
+                    strncpy(url_buf, SPECIAL_URL_127, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }
+                if (sc == SC_SPECIAL_128) {
+                    strncpy(url_buf, SPECIAL_URL_128, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }
+                if (sc == SC_SPECIAL_129) {
+                    strncpy(url_buf, SPECIAL_URL_129, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                } 
+
+                /* Accelerator combos (E,H,R,Q) */
+                if (accel_down) {
+                    switch (sc) {
+                        case SDL_SCANCODE_E:
+                            /* “Edit URL”: clear and prefill with scheme */
+                            strncpy(url_buf, "https://", URL_MAX);
+                            url_buf[URL_MAX-1] = 0;
+                            sel_link = -1;
+                            inhibit_text_once = true;
+                            break;
+                        case SDL_SCANCODE_H:
+                            strncpy(url_buf, HOME_URL, URL_MAX);
+                            url_buf[URL_MAX-1] = 0;
+                            need_fetch = 1;
+                            sel_link = -1;
+                            inhibit_text_once = true;
+                            break;
+                        case SDL_SCANCODE_R:
+                            need_fetch = 1;
+                            inhibit_text_once = true;
+                            break;
+                        case SDL_SCANCODE_Q:
+                            running = 0;
+                            inhibit_text_once = true;
+                            break;
+                        default:
+                            break;
+                    }
+                    continue; /* don’t let these fall through */
+                }
+
+                /* Normal keys (no accelerator) */
+                switch (sc) {
                     /* URL actions */
                     case SDL_SCANCODE_RETURN:
                     case SDL_SCANCODE_KP_ENTER:
@@ -651,10 +756,6 @@ int main(void) {
                         break;
                     }
 
-                    /* Commands (Ctrl+X so letters can be typed in URL) */
-                    case SDL_SCANCODE_Q: if (ctrl) running = 0; break;
-                    case SDL_SCANCODE_R: if (ctrl) need_fetch = 1; break;
-
                     /* Scrolling */
                     case SDL_SCANCODE_DOWN:
                     case SDL_SCANCODE_J: scroll_lines++; break;
@@ -671,7 +772,8 @@ int main(void) {
                         break;
 
                     /* Link navigation */
-                    case SDL_SCANCODE_TAB:
+                    case SDL_SCANCODE_TAB: {
+                        bool shift = (ev.key.mod & SDL_KMOD_SHIFT) != 0;
                         if (page && page->link_count>0) {
                             if (shift) {
                                 sel_link = (sel_link<=0) ? (page->link_count-1) : (sel_link-1);
@@ -680,12 +782,20 @@ int main(void) {
                             }
                         }
                         break;
+                    }
 
                     case SDL_SCANCODE_ESCAPE: running = 0; break;
                     default: break;
                 }
+            } /* KEY_DOWN */
+
+            if (ev.type == SDL_EVENT_KEY_UP) {
+                if (ev.key.scancode == SC_ACCELERATOR) {
+                    accel_down = false;
+                    inhibit_text_once = false; /* reset guard on key-up */
+                }
             }
-        }
+        } /* while events */
 
         SDL_Delay(10);
     }
