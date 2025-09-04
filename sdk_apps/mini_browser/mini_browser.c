@@ -21,16 +21,16 @@
 #define MAX_LINKS     128
 
 /* ---------- Home + special-key targets ---------- */
-#define HOME_URL          "http://bit.ly/4n6t9aO"
+#define HOME_URL          "https://tinyurl.com/3urym78a"
 #define SPECIAL_URL_124   "https://text.npr.org"
 #define SPECIAL_URL_125   "https://news.ycombinator.com/"
 #define SPECIAL_URL_126   "http://www.textfiles.com/"
 #define SPECIAL_URL_127   "https://en.m.wikipedia.org/"
 #define SPECIAL_URL_128   "https://ohmeadhbh.github.io/bobcat/"
-#define SPECIAL_URL_129   "https://greycoder.com/a-list-of-text-only-new-sites/"
+#define SPECIAL_URL_129   "https://curl.se/"
 
 /* ---------- Accelerator + special scancodes ---------- */
-#define SC_ACCELERATOR    ((SDL_Scancode)0xE3)  /* your keyboard's special key */
+#define SC_ACCELERATOR    ((SDL_Scancode)0xE3)  /* WHY2025 key */
 #define SC_SPECIAL_124    ((SDL_Scancode)0x124)
 #define SC_SPECIAL_125    ((SDL_Scancode)0x125)
 #define SC_SPECIAL_126    ((SDL_Scancode)0x126)

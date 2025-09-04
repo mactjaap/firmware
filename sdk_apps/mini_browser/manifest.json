@@ -1,8 +1,8 @@
 {
     "unique_identifier": "mini_browser",
-    "name": "mini_browser",
+    "name": "Mini Browser",
     "author": "MacTjaap",
-    "version": "1",
+    "version": "2",
     "interpreter": "",
     "metadata_file": "",
     "binary_path": "mini_browser.elf",
