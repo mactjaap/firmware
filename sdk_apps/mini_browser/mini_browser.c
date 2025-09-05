@@ -21,7 +21,7 @@
 #define MAX_LINKS     128
 
 /* ---------- Home + special-key targets ---------- */
-#define HOME_URL          "https://tinyurl.com/3urym78a"
+#define HOME_URL          "https://minibrowser.tjaap.com"
 #define SPECIAL_URL_124   "https://text.npr.org"
 #define SPECIAL_URL_125   "https://news.ycombinator.com/"
 #define SPECIAL_URL_126   "http://www.textfiles.com/"
