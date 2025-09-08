@@ -34,11 +34,6 @@ set(APP_LINK_FLAGS
 set(APP_ELF_DIR ${CMAKE_BINARY_DIR}/app_elfs)
 file(MAKE_DIRECTORY ${APP_ELF_DIR})
 
-
-
-
-
-
 function(build_app app_name)
     cmake_parse_arguments(APP "PREINSTALL" "" "SOURCES;LIBRARIES;COMPILE_DEFINITIONS" ${ARGN})
 
@@ -164,10 +159,6 @@ function(build_app app_name)
     set_property(GLOBAL APPEND PROPERTY SDK_APP_BUILD_TARGETS build_app_${app_name})
 endfunction()
 
-
-
-
-
 #
 # Core apps
 #
@@ -187,10 +178,6 @@ build_app(mini_browser PREINSTALL
     LIBRARIES
      sdl3
 )
-
-
-
-
 
 
 # Current updater app
