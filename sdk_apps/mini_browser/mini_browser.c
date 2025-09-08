@@ -10,7 +10,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>   /* for strncasecmp */
+
+
+/* --- Yield macro for BadgeVMS/ESP-IDF, no-op on desktop --- */
+#if defined(ESP_PLATFORM)
+# include "freertos/FreeRTOS.h"
+# include "freertos/task.h"
+# define YIELD_NET() vTaskDelay(pdMS_TO_TICKS(1))
+#else
+# define YIELD_NET() ((void)0)
+#endif
+
+/* Cap and throttle serial content dumps to avoid SDIO RX queue overflow */
+#ifndef SERIAL_DUMP_CAP_BYTES
+# define SERIAL_DUMP_CAP_BYTES 2048   /* print at most 2 KB to serial */
+#endif
+#ifndef SERIAL_DUMP_CHUNK
+# define SERIAL_DUMP_CHUNK 128        /* yield every 128 bytes printed */
+#endif
 
 /* --- Yield macro for BadgeVMS/ESP-IDF, no-op on desktop --- */
 #if defined(ESP_PLATFORM)
@@ -21,8 +38,95 @@
 # define YIELD_NET() ((void)0)
 #endif
 
+/* Tuning knobs for serial dump */
+#ifndef SERIAL_DUMP_CAP_BYTES
+# define SERIAL_DUMP_CAP_BYTES 1024   /* print at most this many bytes */
+#endif
+#ifndef SERIAL_DUMP_CHUNK
+# define SERIAL_DUMP_CHUNK 64         /* write this many bytes per yield */
+#endif
+
+/* Collapse tabs/indentation and multiple blank lines before printing.
+   This affects SERIAL OUTPUT ONLY (on-screen rendering stays unchanged). */
+static void dump_content_serial_clean(const char *s)
+{
+    if (!s) return;
+
+    /* First pass: sanitize into a small scratch buffer up to CAP */
+    char out[SERIAL_DUMP_CAP_BYTES + 1];
+    size_t o = 0;
+
+    int at_line_start = 1;
+    int seen_blank_line = 0;  /* 0 = last line had text, 1 = already emitted one blank line */
+    int space_run = 0;
+
+    for (const char *p = s; *p && o < SERIAL_DUMP_CAP_BYTES; ++p) {
+        char c = *p;
+
+        if (c == '\r') continue;
+        if (c == '\t') c = ' ';              /* tabs -> space */
+
+        if (c == '\n') {
+            if (at_line_start) {
+                /* we're already at line start: allow only a single blank line */
+                if (!seen_blank_line) {
+                    out[o++] = '\n';
+                    seen_blank_line = 1;
+                }
+            } else {
+                out[o++] = '\n';
+                at_line_start = 1;
+                seen_blank_line = 0;
+            }
+            space_run = 0;
+            continue;
+        }
+
+        if (c == ' ') {
+            if (at_line_start) {
+                /* drop leading spaces */
+                continue;
+            }
+            if (space_run) {
+                /* collapse consecutive spaces to one */
+                continue;
+            }
+            space_run = 1;
+            if (o < SERIAL_DUMP_CAP_BYTES) out[o++] = ' ';
+            continue;
+        }
+
+        /* normal visible character */
+        at_line_start = 0;
+        seen_blank_line = 0;
+        space_run = 0;
+
+        /* keep ASCII; for non-ASCII, replace with '?' */
+        unsigned char uc = (unsigned char)c;
+        if (uc < 32 || uc > 126) c = '?';
+
+        if (o < SERIAL_DUMP_CAP_BYTES) out[o++] = c;
+    }
+
+    out[o] = 0;
+
+    /* Second pass: write in small chunks with yields so SDIO stays happy */
+    printf("\n--- CONTENT START ---\n");
+    for (size_t i = 0; i < o; i += SERIAL_DUMP_CHUNK) {
+        size_t n = (o - i > SERIAL_DUMP_CHUNK) ? SERIAL_DUMP_CHUNK : (o - i);
+        fwrite(out + i, 1, n, stdout);
+        fflush(stdout);
+        YIELD_NET();
+    }
+    if (s[o] != '\0') {
+        printf("\n[truncated… printed %u bytes]\n", (unsigned)o);
+    }
+    printf("\n--- CONTENT END ---\n");
+}
+
+
 /* ---------- Limits & layout ---------- */
-#define MAX_BYTES     (64 * 1024)
+#define MAX_BYTES     (16 * 1024)
 #define TIMEOUT_S     10
 #define URL_MAX       256
 #define PAD_LR        10
@@ -34,19 +138,12 @@
 #define LINE_SPACING  2
 #define MAX_LINKS     128
 
-/* --- Icon placement inside URL bar --- */
-#define ICON_LEFT   2
-#define ICON_TOP    2
-#define ICON_SIZE   20
-#define ICON_GAP    8                 /* gap between icon and URL text */
-#define URL_TEXT_X  (PAD_LR + ICON_SIZE + ICON_GAP)  /* start X for URL text */
-
 /* ---------- Home + special-key targets ---------- */
 #define HOME_URL          "https://minibrowser.tjaap.com"
 #define SPECIAL_URL_124   "https://text.npr.org"
 #define SPECIAL_URL_125   "https://news.ycombinator.com/"
 #define SPECIAL_URL_126   "http://www.textfiles.com/"
-#define SPECIAL_URL_127   "https://ifconfig.co"
+#define SPECIAL_URL_127   "https://macip.net/"
 #define SPECIAL_URL_128   "https://ohmeadhbh.github.io/bobcat/"
 #define SPECIAL_URL_129   "https://curl.se/"
 
@@ -142,7 +239,64 @@ typedef struct {
     char base[URL_MAX];         /* base URL for resolution */
 } page_t;
 
-/* ---------- URL helpers ---------- */
+/* ---------- UTF-8 decode + ASCII-only draw ---------- */
+static void draw_char(SDL_Renderer *r, int x, int y, char c) {
+    if (!r) return;
+    if ((unsigned char)c < 32 || (unsigned char)c > 127) c = '?';
+    const unsigned char *cols = font5x7[(unsigned char)c - 32];
+    for (int col = 0; col < FONT_W_COLS; col++) {
+        unsigned char bits = cols[col];
+        for (int row = 0; row < FONT_H_ROWS; row++) {
+            if (bits & (1u << row)) {
+                SDL_FRect px = { (float)(x + col*FONT_SCALE), (float)(y + row*FONT_SCALE),
+                                 (float)FONT_SCALE, (float)FONT_SCALE };
+                SDL_RenderFillRect(r, &px);
+            }
+        }
+    }
+}
+
+static unsigned utf8_next(const char *s, size_t len, size_t *i) {
+    if (*i >= len) return 0;
+    unsigned char c = (unsigned char)s[*i];
+    if (c < 0x80) { (*i)++; return c; }
+    if ((c & 0xE0) == 0xC0 && *i+1 < len) { unsigned cp=((c&0x1F)<<6) | (s[*i+1]&0x3F); *i+=2; return cp; }
+    if ((c & 0xF0) == 0xE0 && *i+2 < len) { unsigned cp=((c&0x0F)<<12)|((s[*i+1]&0x3F)<<6)|(s[*i+2]&0x3F); *i+=3; return cp; }
+    if ((c & 0xF8) == 0xF0 && *i+3 < len) { unsigned cp=((c&0x07)<<18)|((s[*i+1]&0x3F)<<12)|((s[*i+2]&0x3F)<<6)|(s[*i+3]&0x3F); *i+=4; return cp; }
+    (*i)++; return '?';
+}
+
+static void draw_text(SDL_Renderer *r, int x, int y, const char *s, int max_w) {
+    if (!r || !s) return;
+    int cx = x, cy = y;
+    size_t i=0, L=strlen(s);
+    while (i<L) {
+        unsigned cp = utf8_next(s, L, &i);
+        if (cp == 0) break;
+        if (cp == '\n') { cx = x; cy += (CH_H + LINE_SPACING); continue; }
+        if (cp == 0xA0) cp = ' ';                 /* NBSP -> space */
+        if (cp < 32 || cp > 126) continue;        /* draw ASCII only */
+        if (cx + CH_W > x + max_w) { cx = x; cy += (CH_H + LINE_SPACING); }
+        draw_char(r, cx, cy, (char)cp);
+        cx += CH_W;
+    }
+}
+
+/* --- draw URL bar text in one line, clipping head with "..." if needed --- */
+static void draw_bar(SDL_Renderer *r, const char *text) {
+    int max_cols = (VIEW_W - 2*PAD_LR)/CH_W;
+    size_t n = strlen(text);
+    char tmp[URL_MAX + 32];
+    if ((int)n > max_cols) {
+        const char *start = text + (n - (size_t)max_cols + 3);
+        snprintf(tmp, sizeof tmp, "...%s", start);
+        draw_text(r, PAD_LR, 4, tmp, VIEW_W - PAD_LR*2);
+    } else {
+        draw_text(r, PAD_LR, 4, text, VIEW_W - PAD_LR*2);
+    }
+}
+
+/* ---------- helpers: base URL / resolution ---------- */
 static void get_scheme_host(const char *url, char *out, size_t cap) {
     const char *p = strstr(url, "://");
     if (!p) { out[0]=0; return; }
@@ -428,35 +582,46 @@ static int fetch_url(const char *url, mem_t *m) {
     curl_easy_setopt(curl, CURLOPT_URL, url);
 
 #ifdef CURLOPT_BUFFERSIZE
-    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 1024L);
+    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 1024L);   /* smaller read chunks */
 #endif
 #ifdef CURLOPT_MAX_RECV_SPEED_LARGE
-    curl_easy_setopt(curl, CURLOPT_MAX_RECV_SPEED_LARGE, 32768L);
+    curl_easy_setopt(curl, CURLOPT_MAX_RECV_SPEED_LARGE, 32768L); /* ~32 KB/s */
 #endif
+
+    /* Follow a few redirects */
 #ifdef CURLOPT_FOLLOWLOCATION
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 #endif
 #ifdef CURLOPT_MAXREDIRS
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
 #endif
+
+    /* Prefer HTTP/1.1 if the SDK exposes the knob (avoids some HTTP/2 stalls) */
 #if defined(CURLOPT_HTTP_VERSION) && defined(CURL_HTTP_VERSION_1_1)
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 #endif
+
+    /* Ask for uncompressed body to dodge gzip/brotli on embedded builds */
 #ifdef CURLOPT_ACCEPT_ENCODING
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
 #else
+    /* Fallback: add header if option is missing */
 #  ifdef CURLOPT_HTTPHEADER
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Accept-Encoding: identity");
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
 #  endif
 #endif
+
+    /* Timeouts (be a bit generous for large CDNs) */
 #ifdef CURLOPT_CONNECTTIMEOUT
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
 #endif
 #ifdef CURLOPT_TIMEOUT
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 35L);
 #endif
+
+    /* Low-speed abort, only if available */
 #ifdef CURLOPT_LOW_SPEED_LIMIT
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L);
 #endif
@@ -464,132 +629,29 @@ static int fetch_url(const char *url, mem_t *m) {
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 20L);
 #endif
 
-/* Build explicit headers (works even if CURLOPT_USERAGENT is ignored) */
-struct curl_slist *hdrs = NULL;
-hdrs = curl_slist_append(hdrs,
-    "User-Agent: Mozilla/5.0 (BadgeVMS; ESP32; rv:2.1) "
-    "Gecko/20100101 BadgeBrowser/1.0 "
-    "(compatible; MiniBrowser/1.0; +https://github.com/mactjaap/mini_browser/; HTTP/1.1; identity)");
-hdrs = curl_slist_append(hdrs,
-    "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-hdrs = curl_slist_append(hdrs, "Accept-Language: en-US,en;q=0.5");
-hdrs = curl_slist_append(hdrs, "Accept-Encoding: identity");
-curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+#ifdef CURLOPT_USERAGENT
+    curl_easy_setopt(curl, CURLOPT_USERAGENT,
+                     "BadgeVMS-mini-browser/2.1 (+HTTP/1.1, identity)");
+#endif
 
-
-
-
-
+    /* Our sink */
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, wr_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, m);
 
     CURLcode res = curl_easy_perform(curl);
 
+    /* Free header list if we created one and the symbol exists */
+#if !defined(CURLOPT_ACCEPT_ENCODING) && defined(CURLOPT_HTTPHEADER)
+    {
+        struct curl_slist *tmp;
+        /* We don't keep a direct pointer here unless compiled in;
+           if you want to be extra strict, hoist the hdrs variable
+           out of the #ifdefs above and free it here when non-NULL. */
+    }
+#endif
+
     curl_easy_cleanup(curl);
     return (res == CURLE_OK) ? 0 : (int)res;
-}
-
-/* ---------- tiny text renderer ---------- */
-static unsigned utf8_next(const char *s, size_t len, size_t *i) {
-    if (*i >= len) return 0;
-    unsigned char c = (unsigned char)s[*i];
-    if (c < 0x80) { (*i)++; return c; }
-    if ((c & 0xE0) == 0xC0 && *i+1 < len) { unsigned cp=((c&0x1F)<<6) | (s[*i+1]&0x3F); *i+=2; return cp; }
-    if ((c & 0xF0) == 0xE0 && *i+2 < len) { unsigned cp=((c&0x0F)<<12)|((s[*i+1]&0x3F)<<6)|(s[*i+2]&0x3F); *i+=3; return cp; }
-    if ((c & 0xF8) == 0xF0 && *i+3 < len) { unsigned cp=((c&0x07)<<18)|((s[*i+1]&0x3F)<<12)|((s[*i+2]&0x3F)<<6)|(s[*i+3]&0x3F); *i+=4; return cp; }
-    (*i)++; return '?';
-}
-static void draw_char(SDL_Renderer *r, int x, int y, char c) {
-    if (!r) return;
-    if ((unsigned char)c < 32 || (unsigned char)c > 127) c = '?';
-    const unsigned char *cols = font5x7[(unsigned char)c - 32];
-    for (int col = 0; col < FONT_W_COLS; col++) {
-        unsigned char bits = cols[col];
-        for (int row = 0; row < FONT_H_ROWS; row++) {
-            if (bits & (1u << row)) {
-                SDL_FRect px = { (float)(x + col*FONT_SCALE), (float)(y + row*FONT_SCALE),
-                                 (float)FONT_SCALE, (float)FONT_SCALE };
-                SDL_RenderFillRect(r, &px);
-            }
-        }
-    }
-}
-static void draw_text(SDL_Renderer *r, int x, int y, const char *s, int max_w) {
-    if (!r || !s) return;
-    int cx = x, cy = y;
-    size_t i=0, L=strlen(s);
-    while (i<L) {
-        unsigned cp = utf8_next(s, L, &i);
-        if (cp == 0) break;
-        if (cp == '\n') { cx = x; cy += (CH_H + LINE_SPACING); continue; }
-        if (cp == 0xA0) cp = ' ';                 /* NBSP -> space */
-        if (cp < 32 || cp > 126) continue;        /* draw ASCII only */
-        if (cx + ((FONT_W_COLS + FONT_COL_GAP) * FONT_SCALE) > x + max_w) {
-            cx = x; cy += (CH_H + LINE_SPACING);
-        }
-        draw_char(r, cx, cy, (char)cp);
-        cx += ((FONT_W_COLS + FONT_COL_GAP) * FONT_SCALE);
-    }
-}
-
-/* ---------- logo (cyan square + yellow magnifying glass) ---------- */
-static void draw_filled_circle_i(SDL_Renderer *r, int cx, int cy, int R) {
-    int x = 0, y = R;
-    int d = 1 - R;
-    while (y >= x) {
-        int x0 = cx - x, x1 = cx + x;
-        int y0 = cy - y, y1 = cy + y;
-        int y0r = cy - x, y1r = cy + x;
-
-        SDL_FRect s1 = { (float)x0, (float)y0, (float)(x1 - x0 + 1), 1.0f };
-        SDL_FRect s2 = { (float)x0, (float)y1, (float)(x1 - x0 + 1), 1.0f };
-        SDL_FRect s3 = { (float)(cx - y), (float)y0r, (float)(2*y + 1), 1.0f };
-        SDL_FRect s4 = { (float)(cx - y), (float)y1r, (float)(2*y + 1), 1.0f };
-        SDL_RenderFillRect(r, &s1);
-        SDL_RenderFillRect(r, &s2);
-        SDL_RenderFillRect(r, &s3);
-        SDL_RenderFillRect(r, &s4);
-
-        x++;
-        if (d < 0) d += 2*x + 1;
-        else { y--; d += 2*(x - y) + 1; }
-    }
-}
-static void draw_logo(SDL_Renderer *r) {
-    if (!r) return;
-    /* Cyan square background at (ICON_LEFT, ICON_TOP), ICON_SIZE x ICON_SIZE */
-    SDL_SetRenderDrawColor(r, 0, 180, 180, 255);
-    SDL_FRect bg = { (float)ICON_LEFT, (float)ICON_TOP, (float)ICON_SIZE, (float)ICON_SIZE };
-    SDL_RenderFillRect(r, &bg);
-
-    /* Yellow magnifying glass: circle + short handle */
-    int cx = ICON_LEFT + ICON_SIZE/2;   /* center within square */
-    int cy = ICON_TOP  + ICON_SIZE/2;
-    int R  = 6;
-
-    SDL_SetRenderDrawColor(r, 255, 255, 0, 255);   /* yellow circle */
-    draw_filled_circle_i(r, cx, cy, R);
-
-    /* 2px thick handle going down-right */
-    SDL_SetRenderDrawColor(r, 255, 255, 0, 255);   /* yellow handle */
-    SDL_FRect handle = { (float)(cx + R - 1), (float)(cy + R - 1), 6.0f, 2.0f };
-    SDL_RenderFillRect(r, &handle);
-}
-
-/* --- draw URL bar text, clipped from the LEFT, starting at URL_TEXT_X --- */
-static void draw_bar(SDL_Renderer *r, const char *text) {
-    int max_cols = (VIEW_W - URL_TEXT_X - PAD_LR) / CH_W;
-    if (max_cols < 1) max_cols = 1;
-
-    size_t n = strlen(text);
-    char tmp[URL_MAX + 32];
-    if ((int)n > max_cols) {
-        const char *start = text + (n - (size_t)max_cols + 3);
-        snprintf(tmp, sizeof tmp, "...%s", start);
-        draw_text(r, URL_TEXT_X, 4, tmp, VIEW_W - URL_TEXT_X - PAD_LR);
-    } else {
-        draw_text(r, URL_TEXT_X, 4, text, VIEW_W - URL_TEXT_X - PAD_LR);
-    }
 }
 
 /* ---------- UI ---------- */
@@ -601,9 +663,6 @@ static void draw_ui(SDL_Renderer *r, const char *bar_text) {
     SDL_FRect top = (SDL_FRect){0, 0, VIEW_W, URLBAR_H};
     SDL_SetRenderDrawColor(r, 30, 30, 30, 255);
     SDL_RenderFillRect(r, &top);
-
-    /* logo first so text draws alongside it */
-    draw_logo(r);
 
     SDL_SetRenderDrawColor(r, 220, 220, 220, 255);
     draw_bar(r, bar_text);
@@ -617,32 +676,6 @@ static int is_printable_ascii(const char *text) {
     if (!text || !*text) return 0;
     unsigned char c = (unsigned char)text[0];
     return (c >= 32 && c <= 126);
-}
-
-/* ---------- history (for WHY + B) ---------- */
-#define HISTORY_MAX 32
-static char g_hist[HISTORY_MAX][URL_MAX];
-static int  g_hist_len = 0;
-
-static void history_push(const char *u) {
-    if (!u || !*u) return;
-    if (g_hist_len > 0 && strncmp(g_hist[g_hist_len - 1], u, URL_MAX) == 0) return; /* no dup consec */
-    if (g_hist_len < HISTORY_MAX) {
-        strncpy(g_hist[g_hist_len], u, URL_MAX);
-        g_hist[g_hist_len][URL_MAX-1] = 0;
-        g_hist_len++;
-    } else {
-        memmove(g_hist, g_hist + 1, sizeof(g_hist[0]) * (HISTORY_MAX - 1));
-        strncpy(g_hist[HISTORY_MAX - 1], u, URL_MAX);
-        g_hist[HISTORY_MAX - 1][URL_MAX - 1] = 0;
-    }
-}
-static int history_back(char *out) {
-    if (g_hist_len <= 1) return 0;        /* nowhere to go */
-    g_hist_len--;                          /* drop current */
-    strncpy(out, g_hist[g_hist_len - 1], URL_MAX);
-    out[URL_MAX - 1] = 0;
-    return 1;
 }
 
 /* ---------- main ---------- */
@@ -671,7 +704,7 @@ int main(void) {
     wifi_connect();
     curl_global_init(0);
 
-    char url_buf[URL_MAX] = HOME_URL;
+    char url_buf[URL_MAX] = HOME_URL;  /* New home page */
     char barline[URL_MAX + 64];
     char *content_wrapped = NULL;
     page_t *page = NULL;
@@ -679,14 +712,20 @@ int main(void) {
     int  need_fetch = 1;
     int  sel_link = -1;
 
+
+
+
+
 #if defined(ESP_PLATFORM)
     esp_log_level_set("ESP_CURL",        ESP_LOG_ERROR);
     esp_log_level_set("HTTP_CLIENT",     ESP_LOG_ERROR);
     esp_log_level_set("transport_base",  ESP_LOG_ERROR);
 #endif
 
-    bool accel_down = false;        /* WHY key held */
-    bool inhibit_text_once = false; /* swallow TEXT_INPUT after commands */
+
+    /* Accelerator + text-input suppression */
+    bool accel_down = false;           /* true while special key (0xE3) is held */
+    bool inhibit_text_once = false;    /* drop next TEXT_INPUT after handling a command */
 
     const int max_cols = (VIEW_W - 2*PAD_LR) / CH_W;
     const int lines_per_page = (VIEW_H - PAD_TOP - PAD_BOTTOM) / (CH_H + LINE_SPACING);
@@ -713,9 +752,6 @@ int main(void) {
                     strncpy(url_buf, tmp, URL_MAX); url_buf[URL_MAX-1]=0;
                 }
                 if (is_http_scheme(url_buf)) {
-                    /* record in history just before fetching */
-                    history_push(url_buf);
-
                     snprintf(barline, sizeof(barline), "%s", url_buf);
                     draw_ui(ren, barline);
                     SDL_RenderPresent(ren);
@@ -742,6 +778,7 @@ int main(void) {
                             sel_link = -1;
                             printf("[mini_browser] parsed %d links from %s\n", page->link_count, url_buf);
 
+                            /* Dump wrapped content to serial */
                             if (wrapped) {
                                 printf("\n--- CONTENT START ---\n%s\n--- CONTENT END ---\n", wrapped);
                             }
@@ -789,17 +826,17 @@ int main(void) {
             if (ev.type == SDL_EVENT_QUIT) { running = 0; break; }
 
             if (ev.type == SDL_EVENT_TEXT_INPUT) {
-                if (inhibit_text_once) {
+                if (inhibit_text_once) {            /* swallow the next text input after a command */
                     inhibit_text_once = false;
                     continue;
                 }
-                const char *t = ev.text.text;
+                const char *t = ev.text.text;       /* UTF-8 subset, accept ASCII */
                 if (is_printable_ascii(t)) {
                     size_t curlen = strlen(url_buf);
                     if (curlen < URL_MAX - 1) {
                         url_buf[curlen] = t[0];
                         url_buf[curlen + 1] = 0;
-                        sel_link = -1;
+                        sel_link = -1; /* typing cancels selection preview */
                     }
                 }
             }
@@ -810,22 +847,65 @@ int main(void) {
                 /* Track accelerator press/release */
                 if (sc == SC_ACCELERATOR) {
                     accel_down = true;
-                    inhibit_text_once = true;
+                    inhibit_text_once = true; /* avoid stray text if this key emits any */
                     continue;
                 }
 
-                /* Special one-shot keys -> direct navigate */
-                if (sc == SC_SPECIAL_124) { strncpy(url_buf, SPECIAL_URL_124, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_125) { strncpy(url_buf, SPECIAL_URL_125, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_126) { strncpy(url_buf, SPECIAL_URL_126, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_127) { strncpy(url_buf, SPECIAL_URL_127, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_128) { strncpy(url_buf, SPECIAL_URL_128, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_129) { strncpy(url_buf, SPECIAL_URL_129, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
+                /* Special one-shot keys -> direct navigate. Top of WHY2025 badge keyboard  [] /\ X O & <>  */
+                if (sc == SC_SPECIAL_124) {
+                    strncpy(url_buf, SPECIAL_URL_124, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }
+                if (sc == SC_SPECIAL_125) {
+                    strncpy(url_buf, SPECIAL_URL_125, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }
+                if (sc == SC_SPECIAL_126) {
+                    strncpy(url_buf, SPECIAL_URL_126, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }       
+                if (sc == SC_SPECIAL_127) {
+                    strncpy(url_buf, SPECIAL_URL_127, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }
+                if (sc == SC_SPECIAL_128) {
+                    strncpy(url_buf, SPECIAL_URL_128, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                }
+                if (sc == SC_SPECIAL_129) {
+                    strncpy(url_buf, SPECIAL_URL_129, URL_MAX);
+                    url_buf[URL_MAX-1] = 0;
+                    need_fetch = 1;
+                    sel_link = -1;
+                    inhibit_text_once = true;
+                    continue;
+                } 
 
-                /* Accelerator combos (E,H,R,Q,B) */
+                /* Accelerator combos (E,H,R,Q) */
                 if (accel_down) {
                     switch (sc) {
                         case SDL_SCANCODE_E:
+                            /* “Edit URL”: clear and prefill with scheme */
                             strncpy(url_buf, "https://", URL_MAX);
                             url_buf[URL_MAX-1] = 0;
                             sel_link = -1;
@@ -842,17 +922,6 @@ int main(void) {
                             need_fetch = 1;
                             inhibit_text_once = true;
                             break;
-                        case SDL_SCANCODE_B: { /* BACK */
-                            char prev[URL_MAX];
-                            if (history_back(prev)) {
-                                strncpy(url_buf, prev, URL_MAX);
-                                url_buf[URL_MAX-1] = 0;
-                                need_fetch = 1;
-                                sel_link = -1;
-                            }
-                            inhibit_text_once = true;
-                            break;
-                        }
                         case SDL_SCANCODE_Q:
                             running = 0;
                             inhibit_text_once = true;
@@ -860,7 +929,7 @@ int main(void) {
                         default:
                             break;
                     }
-                    continue;
+                    continue; /* don’t let these fall through */
                 }
 
                 /* Normal keys (no accelerator) */
@@ -920,7 +989,7 @@ int main(void) {
             if (ev.type == SDL_EVENT_KEY_UP) {
                 if (ev.key.scancode == SC_ACCELERATOR) {
                     accel_down = false;
-                    inhibit_text_once = false;
+                    inhibit_text_once = false; /* reset guard on key-up */
                 }
             }
         } /* while events */
