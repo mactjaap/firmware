@@ -376,13 +376,13 @@ static void draw_window(Launcher_Context *ctx) {
     draw_title_bar(&v, wx + 2, wy + 2, ww - 4, th, "WHY Launcher");
 
     char info[96];
-    snprintf(info, sizeof(info), "Use \x18/\x19 to navigate   Enter: Launch   A: About   ESC: Exit");
+    snprintf(info, sizeof(info), "To navigate   Enter: Launch   A: About   ESC: Exit");
     draw_text(&v, wx + 16, wy + th + 12, info, COL_TEXT_MID);
 
-    /* Accent swatches to verify palette on-device */
+    /* Accent swatches to verify palette on-device ... not in use...
     int bx = wx + ww - 16 - 6*10, by = wy + th + 10;
     uint32_t acc[6] = { COL_ACCENT_1, COL_ACCENT_2, COL_ACCENT_3, COL_ACCENT_4, COL_ACCENT_5, COL_ACCENT_6 };
-    for (int i=0;i<6;i++){ draw_rect(&v, bx + i*10, by, 8, 8, acc[i]); }
+    for (int i=0;i<6;i++){ draw_rect(&v, bx + i*10, by, 8, 8, acc[i]); } */
 
     const int list_y = wy + th + 36;
     const int list_h = wh - th - 84;
@@ -399,7 +399,12 @@ static void draw_window(Launcher_Context *ctx) {
     draw_rect(&v, wx + 2, wy + wh - 40, ww - 4, 38, COL_BTN);
     draw_text(&v, wx + 16, wy + wh - 32, "WHY2025 • BadgeVMS", COL_BTN_TEXT);
 
+ /*   ctx->items_per_page = (list_h - 6) / item_h; */
+/*    ...now 7...... */
+
     ctx->items_per_page = (list_h - 6) / item_h;
+    if (ctx->items_per_page < 7) ctx->items_per_page = 7;
+    
     int start = ctx->scroll_offset;
     int end   = start + ctx->items_per_page;
     if (end > ctx->total_items) end = ctx->total_items;
