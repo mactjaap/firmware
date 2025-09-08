@@ -543,6 +543,25 @@ static bool is_priority_uid(const char *uid) {
         (strcmp(uid, "why2025_namebadge") == 0);
 }
 
+
+static void move_uid_to_front(application_t **apps, size_t num, const char *uid) {
+    if (!apps || num == 0 || !uid) return;
+    size_t idx = (size_t)-1;
+    for (size_t i = 0; i < num; ++i) {
+        if (apps[i] && apps[i]->unique_identifier &&
+            strcmp(apps[i]->unique_identifier, uid) == 0) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == (size_t)-1 || idx == 0) return;        // not found or already first
+    application_t *hit = apps[idx];
+    memmove(&apps[1], &apps[0], idx * sizeof(*apps)); // shift block right by 1
+    apps[0] = hit;
+}
+
+
+
 /* ===========================================================
    Main loop
    =========================================================== */
@@ -631,9 +650,18 @@ int main(int argc, char *argv[]) {
     for (size_t i = 0; i < n_prio; ++i) apps[idx++] = prio[i];
     for (size_t i = 0; i < n_rest; ++i) apps[idx++] = rest[i];
 
+    /* >>> Add this line to force Mini Browser to position #1 */
+    // after building apps[]
+    /* move_uid_to_front(apps, num, "third_app");
+    move_uid_to_front(apps, num, "second_app");
+    move_uid_to_front(apps, num, "mini_browser"); // ends up first */
+    /* move mini_browser to top */
+
+    move_uid_to_front(apps, num, "mini_browser");
+
     for (size_t i = 0; i < num; ++i) {
         printf("FINAL_ORDER[%zu]: %s (%s)\n", i, apps[i]->name, apps[i]->unique_identifier);
-    }
+    }   
 
     bool ok = run_launcher(apps, num);
 
