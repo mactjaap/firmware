@@ -40,7 +40,7 @@ file(MAKE_DIRECTORY ${APP_ELF_DIR})
 
 
 function(build_app app_name)
-    cmake_parse_arguments(APP "PREINSTALL" "" "SOURCES;LIBRARIES" ${ARGN})
+    cmake_parse_arguments(APP "PREINSTALL" "" "SOURCES;LIBRARIES;COMPILE_DEFINITIONS" ${ARGN})
 
     if(NOT APP_SOURCES)
         message(FATAL_ERROR "build_app: SOURCES must be specified for ${app_name}")
@@ -81,6 +81,7 @@ function(build_app app_name)
             ${APP_LINK_FLAGS}
             -isystem${SDK_INCLUDE_DIR}
             -o ${APP_ELF_DIR}/${app_name}.elf
+            -I ${APP_SOURCE_DIR}
             ${ABSOLUTE_SOURCES}
             ${LIBRARY_FLAGS}
             ${DEFINE_FLAGS}
@@ -341,6 +342,16 @@ build_app(hardware_test PREINSTALL
      run_tests.c
 )
 
+build_app(memtester
+    SOURCES
+     memtester.c
+     tests.c
+     getopt.c
+    COMPILE_DEFINITIONS
+     "__badgevms__=(1)"
+     "TEST_NARROW_WRITES=(1)"
+)
+
 build_app(bench_basic_a
     SOURCES 
      bench_basic_a.c
@@ -401,6 +412,13 @@ build_app(sdl_test PREINSTALL
      sdl_test.c
     LIBRARIES
      sdl3
+)
+
+build_app(sdl2_test PREINSTALL
+    SOURCES
+     sdl2_test.c
+    LIBRARIES
+     sdl2
 )
 
 build_app(thread_test

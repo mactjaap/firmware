@@ -57,7 +57,7 @@ IRAM_ATTR void draw_window_box(uint16_t *fb, window_t *window, bool foreground) 
     int height = window->rect.h;
 
     int total_width  = width + 2 * BORDER_PX;
-    int total_height = height + BORDER_TOP_PX;
+    int total_height = height + BORDER_TOP_PX + BORDER_PX;
 
     draw_rect_rotated(fb, x, y, total_width, total_height, window_colors.window_outer_border);
 

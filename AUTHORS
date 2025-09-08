@@ -11,4 +11,5 @@ HP van Braam <hp@tmm.cx>                              all files.
 Julian Scheffers <julian@scheffers.net>               contributions to buddy allocator
 Joram Agten <joram.agten@gmail.com>                   drivers/ test_badge.c
 Eirik Furuseth / Heplaphon <heplaphon@heplaphon.com>  main/ota drivers/bmi270
-
+Joost Peters                                          sdk_libs/sdl2
+Jonas Meeuws                                          CMake magician / micropython

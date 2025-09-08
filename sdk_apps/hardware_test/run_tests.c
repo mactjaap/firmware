@@ -20,15 +20,10 @@ int ping_badgehub(void) {
     curl_global_init(0);
     CURL *curl = curl_easy_init();
 
-    CURLcode res;
-    const char* mac = get_mac_address();
-    char     url[200];
-    snprintf(
-        url,
-        sizeof(url),
-        "https://badge.why2025.org/api/v3/ping?id=%s-v1&mac=%s",
-        mac, mac
-    );
+    CURLcode    res;
+    char const *mac = get_mac_address();
+    char        url[200];
+    snprintf(url, sizeof(url), "https://badge.why2025.org/api/v3/ping?id=%s-v1&mac=%s", mac, mac);
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "BadgeVMS-libcurl/1.0");
     int retries = 5;
@@ -59,7 +54,7 @@ int ping_badgehub(void) {
 
 void device_id_test(app_state_t *app) {
     // Run the Device ID test
-    const char* mac = get_mac_address();
+    char const *mac = get_mac_address();
     snprintf(app->tests[8].status, sizeof(app->tests[8].status), "%s", mac);
     printf("Device ID: %s\n", mac);
     app->tests[8].passed = mac != NULL;

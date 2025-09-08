@@ -24,9 +24,6 @@
 
 #include <stdatomic.h>
 
-#define TOP_BAR_PX  50
-#define SIDE_BAR_PX 0
-
 #define MAX_VISIBLE_RECTS 64
 
 typedef struct {

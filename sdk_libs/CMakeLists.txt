@@ -79,6 +79,7 @@ function(build_sdk_library lib_name)
     set_property(GLOBAL APPEND PROPERTY SDK_LIB_TARGETS sdk_staging_add_lib_${lib_name})
 endfunction()
 
+build_sdk_library(sdl2)
 build_sdk_library(sdl3)
 
 get_property(SDK_LIB_TARGETS GLOBAL PROPERTY SDK_LIB_TARGETS)

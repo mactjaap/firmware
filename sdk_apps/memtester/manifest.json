@@ -1,0 +1,10 @@
+{
+    "unique_identifier": "memtester",
+    "name": "memtester",
+    "author": "Team:Badge",
+    "version": "1",
+    "interpreter": "",
+    "metadata_file": "",
+    "binary_path": "memtester.elf",
+    "source": 1
+}

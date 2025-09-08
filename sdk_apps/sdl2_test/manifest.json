@@ -1,0 +1,10 @@
+{
+    "unique_identifier": "sdl2_test",
+    "name": "sdl2_test",
+    "author": "Team:Badge",
+    "version": "1",
+    "interpreter": "",
+    "metadata_file": "",
+    "binary_path": "sdl2_test.elf",
+    "source": 1
+}

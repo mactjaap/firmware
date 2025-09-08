@@ -11,8 +11,12 @@ dependencies:
       type: service
     version: 0.5.3
   espressif/eppp_link:
+<<<<<<< HEAD
     component_hash: 
       3b1c8f79fa1261a87b9fa8ea6012cb8bf058a949d120c8ad59e1eeffdc0c154f
+=======
+    component_hash: 07db13a39e28c52b7aa50bc4d7fe82b078297c1be578713138c5e818bcd7d149
+>>>>>>> main
     dependencies:
     - name: espressif/esp_serial_slave_link
       registry_url: https://components.espressif.com
@@ -24,7 +28,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.0.0
+    version: 1.0.1
   espressif/esp-serial-flasher:
     component_hash: 
       b06d58e01a43728d61fe344ceaeca192d46e159a3d6c15d40d968dc8e34fa357
@@ -112,6 +116,6 @@ direct_dependencies:
 - espressif/esp_wifi_remote
 - espressif/i2c_bus
 - idf
-manifest_hash: a659039a00d5e1caa4997a94c31f399131285b3f5930bf9650d308932a028439
+manifest_hash: e3ee5fb5cfb34420061b616f9abaf332ed332278cc08d8ec929e564740accb64
 target: esp32p4
 version: 2.0.0

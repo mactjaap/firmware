@@ -419,8 +419,120 @@ static void draw_window(Launcher_Context *ctx) {
         draw_rect(&v, icon_x - 3, icon_y - 3, icon_sz + 6, icon_sz + 6, COL_FOCUS_BG);
         draw_app_icon(&v, ctx->applications[i]->unique_identifier, icon_x, icon_y, icon_sz, sel);
 
+<<<<<<< HEAD
         const char *name = ctx->applications[i]->name ? ctx->applications[i]->name : "(unnamed)";
         draw_text_bold(&v, icon_x + icon_sz + 16, iy + 10, name, row_text);
+=======
+static void draw_3d_border(Launcher_Context *ctx, int x, int y, int w, int h, int inset) {
+    uint32_t light_color = inset ? CDE_BORDER_DARK : CDE_BORDER_LIGHT;
+    uint32_t dark_color  = inset ? CDE_BORDER_LIGHT : CDE_BORDER_DARK;
+
+    draw_rect(ctx, x, y, w, 2, light_color);
+    draw_rect(ctx, x, y, 2, h, light_color);
+
+    draw_rect(ctx, x, y + h - 2, w, 2, dark_color);
+    draw_rect(ctx, x + w - 2, y, 2, h, dark_color);
+}
+
+static void draw_button(Launcher_Context *ctx, int x, int y, int w, int h, char const *text, int pressed) {
+    draw_rect(ctx, x, y, w, h, CDE_BUTTON_COLOR);
+    draw_3d_border(ctx, x, y, w, h, pressed);
+
+    int text_y = y + (h - FONT_HEIGHT) / 2;
+    if (pressed) {
+        text_y += 1;
+    }
+    draw_text_centered(ctx, x, text_y, w, text, CDE_TEXT_COLOR);
+}
+
+static void draw_about_dialog(Launcher_Context *ctx) {
+    int dialog_w = 450;
+    int dialog_h = 350;
+    int dialog_x = (SCREEN_WIDTH - dialog_w) / 2;
+    int dialog_y = (SCREEN_HEIGHT - dialog_h) / 2;
+
+    draw_rect(ctx, dialog_x + 5, dialog_y + 5, dialog_w, dialog_h, 0x505050);
+
+    draw_rect(ctx, dialog_x, dialog_y, dialog_w, dialog_h, CDE_PANEL_COLOR);
+    draw_3d_border(ctx, dialog_x, dialog_y, dialog_w, dialog_h, 0);
+
+    int title_h = 30;
+    draw_rect(ctx, dialog_x + 2, dialog_y + 2, dialog_w - 4, title_h, CDE_TITLE_BG);
+    draw_text_bold(ctx, dialog_x + 10, dialog_y + 8, "About BadgeVMS", CDE_SELECTED_TEXT);
+
+    int content_y = dialog_y + title_h + 30;
+    draw_text_centered(ctx, dialog_x, content_y, dialog_w, "BadgeVMS", CDE_TEXT_COLOR);
+    draw_text_centered(ctx, dialog_x, content_y + 30, dialog_w, "Version 1.0", CDE_TEXT_COLOR);
+    draw_text_centered(
+        ctx,
+        dialog_x,
+        content_y + 60,
+        dialog_w,
+        "A Virtual Memory System for badges",
+        CDE_INACTIVE_TEXT
+    );
+
+    draw_text_centered(ctx, dialog_x, content_y + 120, dialog_w, "Press ENTER or ESC to close", CDE_INACTIVE_TEXT);
+}
+
+static void draw_launcher_window(Launcher_Context *ctx) {
+    int window_x = 30;
+    int window_y = 30;
+    int window_w = SCREEN_WIDTH - 60;
+    int window_h = SCREEN_HEIGHT - 60;
+
+    draw_rect(ctx, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, CDE_BG_COLOR);
+
+    draw_rect(ctx, window_x, window_y, window_w, window_h, CDE_PANEL_COLOR);
+    draw_3d_border(ctx, window_x, window_y, window_w, window_h, 0);
+
+    int title_h = 45;
+    draw_rect(ctx, window_x + 3, window_y + 3, window_w - 6, title_h, CDE_TITLE_BG);
+    draw_text_bold(ctx, window_x + 15, window_y + 11, "WHY Application Launcher", CDE_SELECTED_TEXT);
+
+    char count_text[64];
+    if (ctx->total_items == 1) {
+        snprintf(count_text, sizeof(count_text), "1 Application Available");
+    } else {
+        snprintf(count_text, sizeof(count_text), "%d Applications Available", ctx->total_items);
+    }
+    draw_text(ctx, window_x + 15, window_y + title_h + 20, count_text, CDE_TEXT_COLOR);
+
+    int list_y      = window_y + title_h + 55;
+    int list_h      = window_h - title_h - 110;
+    int item_height = 80;
+
+    draw_rect(ctx, window_x + 15, list_y, window_w - 30, list_h, 0xFFFFFF);
+    draw_3d_border(ctx, window_x + 15, list_y, window_w - 30, list_h, 1);
+
+    ctx->items_per_page = (list_h - 6) / item_height;
+    int visible_start   = ctx->scroll_offset;
+    int visible_end     = visible_start + ctx->items_per_page;
+    if (visible_end > ctx->total_items)
+        visible_end = ctx->total_items;
+
+    for (int i = visible_start; i < visible_end; i++) {
+        int item_y = list_y + 3 + (i - visible_start) * item_height;
+        int item_x = window_x + 18;
+        int item_w = window_w - 36;
+
+        if (i == ctx->selected_item) {
+            draw_rect(ctx, item_x, item_y, item_w, item_height - 2, CDE_SELECTED_BG);
+        }
+
+        uint32_t text_color = (i == ctx->selected_item) ? CDE_SELECTED_TEXT : CDE_TEXT_COLOR;
+
+        int icon_size = 48;
+        int icon_x    = item_x + 10;
+        int icon_y    = item_y + (item_height - icon_size) / 2;
+
+        uint32_t icon_color = (i == ctx->selected_item) ? CDE_SELECTED_TEXT : CDE_BUTTON_COLOR;
+        draw_rect(ctx, icon_x, icon_y, icon_size, icon_size, icon_color);
+        draw_3d_border(ctx, icon_x, icon_y, icon_size, icon_size, 1);
+
+        int text_x = icon_x + icon_size + 15;
+        draw_text_bold(ctx, text_x, item_y + 10, ctx->applications[i]->name, text_color);
+>>>>>>> main
 
         if (ctx->applications[i]->version) {
             char ver[32];

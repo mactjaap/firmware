@@ -32,7 +32,8 @@ _Note: When you do a `git pull` please run an `idf.py fullclean` before rebuildi
 The directory [sdk_apps](sdk_apps) has several small programs in it.
 
 * [framebuffer_test](sdk_apps/framebuffer_test) shows you how to directly interact with the windowing system and keyboard input.
-* [sdl_test](sdk_apps/sdl_test) does the same, but for SDL.
+* [sdl_test](sdk_apps/sdl_test) does the same, but for SDL3.
+* [sdl2_test](sdk_apps/sdl2_test) does the same, but for SDL2.
 * [curl_test](sdk_apps/curl_test) shows you how to do http(s) calls, 
 * [thread_test](sdk_apps/thread_test) has a simple example of creating a thread and how to interact with workers.
 * And many more!
@@ -41,7 +42,7 @@ Finally as a more complete example there is also [doomgeneric](sdk_apps/doomgene
 
 # Building applications
 
-BadgeVMS has a simple SDK with C, BadgeVMS headers, and SDL3. You can build the SDK with
+BadgeVMS has a simple SDK with C, BadgeVMS headers, SDL3, and SDL2. You can build the SDK with
 
 ```
 idf.py sdk

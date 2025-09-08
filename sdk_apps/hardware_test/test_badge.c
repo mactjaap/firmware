@@ -32,8 +32,7 @@
 #include <string.h>
 #include <time.h>
 
-typedef enum
-{
+typedef enum {
     RENDER_MODE_TESTS,
     RENDER_MODE_FULL_WHITE,
     RENDER_MODE_FULL_RED,
@@ -95,8 +94,7 @@ void render_ui(app_state_t *app) {
 
     uint16_t bg_color = rgb888_to_rgb565(32, 32, 32);
 
-    if (render_mode != RENDER_MODE_TESTS)
-    {
+    if (render_mode != RENDER_MODE_TESTS) {
         if (render_mode == RENDER_MODE_FULL_WHITE)
             bg_color = rgb888_to_rgb565(0xFF, 0xFF, 0xFF);
         if (render_mode == RENDER_MODE_FULL_RED)
@@ -215,15 +213,12 @@ int main() {
             event_t event = window_event_poll(app.window, false, sleep_time / 1000);
 
             switch (event.type) {
-                case EVENT_QUIT:
-                {
+                case EVENT_QUIT: {
                     running = false;
                     break;
                 }
-                case EVENT_KEY_DOWN:
-                {
-                    if (event.keyboard.scancode == KEY_SCANCODE_SPACE)
-                    {
+                case EVENT_KEY_DOWN: {
+                    if (event.keyboard.scancode == KEY_SCANCODE_SPACE) {
                         render_mode++;
                         if (render_mode >= RENDER_MODE_COUNT)
                             render_mode = 0;
@@ -231,13 +226,11 @@ int main() {
                     handle_keyboard_event(&app, &event.keyboard);
                     break;
                 }
-                case EVENT_KEY_UP:
-                {
+                case EVENT_KEY_UP: {
                     handle_keyboard_event(&app, &event.keyboard);
                     break;
                 }
-                default:
-                    break;
+                default: break;
             }
 
             render_ui(&app);

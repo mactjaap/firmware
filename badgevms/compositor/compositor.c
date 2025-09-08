@@ -85,8 +85,8 @@ typedef struct {
 
 rotation_angle_t rotation = ROTATION_ANGLE_270;
 
-#define WINDOW_MAX_W (FRAMEBUFFER_MAX_W - (2 * BORDER_PX) - SIDE_BAR_PX)
-#define WINDOW_MAX_H (FRAMEBUFFER_MAX_H - BORDER_TOP_PX - TOP_BAR_PX)
+#define WINDOW_MAX_W (FRAMEBUFFER_MAX_W - (2 * BORDER_PX))
+#define WINDOW_MAX_H (FRAMEBUFFER_MAX_H - BORDER_TOP_PX - BORDER_PX)
 
 #define ALL_DISPLAY_FB_MASK 7 // (1 + 2 + 4)
 
@@ -138,8 +138,8 @@ __attribute__((always_inline)) static inline window_coords_t
         ret.x = 0;
         ret.y = 0;
     } else {
-        int max_x = FRAMEBUFFER_MAX_W - (window->rect.w + (2 * BORDER_PX)) - 1;
-        int max_y = FRAMEBUFFER_MAX_H - (window->rect.h + (BORDER_TOP_PX + BORDER_PX)) - 1;
+        int max_x = FRAMEBUFFER_MAX_W - (window->rect.w + (2 * BORDER_PX));
+        int max_y = FRAMEBUFFER_MAX_H - (window->rect.h + (BORDER_TOP_PX + BORDER_PX));
         ret.x     = position.x > max_x ? max_x : position.x;
         ret.y     = position.y > max_y ? max_y : position.y;
     }

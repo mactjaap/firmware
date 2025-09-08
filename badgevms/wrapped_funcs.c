@@ -614,6 +614,10 @@ int why_system(char const *command) {
     return 0;
 }
 
+void why__exit(int status) {
+    why_exit(status);
+}
+
 void why__Exit(int status) {
     why_exit(status);
 }

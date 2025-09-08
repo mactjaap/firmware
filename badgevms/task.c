@@ -477,7 +477,7 @@ pid_t run_task_path(char const *path, uint16_t stack_size, task_type_t type, int
     if (argc) {
         ret = run_task(strdup((void const *)path), stack_size, type, argc, argv);
     } else {
-        char **argv_tmp = malloc(sizeof(char *));
+        char **argv_tmp = calloc(2, sizeof(char *));
         argv_tmp[0]     = strdup(path);
         ret             = run_task(strdup((void const *)path), stack_size, type, 1, argv_tmp);
         free(argv_tmp[0]);
@@ -496,18 +496,18 @@ pid_t run_task(void const *buffer, uint16_t stack_size, task_type_t type, int ar
     task_info_t *parent_task_info = get_task_info();
 
     // Pack up argv in a nice compact list
-    size_t argv_size = argc * sizeof(char *);
+    size_t argv_size = (argc + 1) * sizeof(char *);
     for (int i = 0; i < argc; ++i) {
         argv_size += strlen(argv[i]) + 1;
     }
 
-    char **new_argv = malloc(argv_size);
+    char **new_argv = calloc(1, argv_size);
     if (!new_argv && argv_size) {
         ESP_LOGE(TAG, "Out of memory trying to allocate argv buffer");
         return -1;
     }
 
-    size_t offset = argc * sizeof(char *);
+    size_t offset = (argc + 1) * sizeof(char *);
     for (int i = 0; i < argc; ++i) {
         char *arg_address = ((void *)new_argv) + offset;
         new_argv[i]       = arg_address;
