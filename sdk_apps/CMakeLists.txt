@@ -330,6 +330,10 @@ build_app(wifi_test PREINSTALL
      wifi_test.c
 )
 
+#build_app(http_screenshot_server PREINSTALL
+#    SOURCES
+#     http_screenshot_server.c
+#)
 
 get_property(SDK_APP_ELFS GLOBAL PROPERTY SDK_APP_ELFS)
 add_custom_target(sdk_app_build_all ALL DEPENDS ${SDK_APP_ELFS})

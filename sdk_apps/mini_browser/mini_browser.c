@@ -134,12 +134,16 @@ static size_t wr_cb(void *ptr, size_t sz, size_t nm, void *ud) {
 }
 
 /* ---------- link + page model ---------- */
-typedef struct { char href[URL_MAX]; } link_t;
+typedef struct {
+    char href[URL_MAX];
+} link_t;
+
 typedef struct {
     char *text;                 /* rendered text with [n] markers */
     link_t links[MAX_LINKS];
     int link_count;
     char base[URL_MAX];         /* base URL for resolution */
+    char title[128];            /* page <title> */
 } page_t;
 
 /* ---------- URL helpers ---------- */
@@ -246,6 +250,71 @@ static int is_supported_href(const char *h) {
     return 1; /* allow http(s) and relatives */
 }
 
+/* ---------- HTML -> page_t for v1.3---------- */
+
+static const char *find_case_insensitive(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !*needle) return haystack;
+
+    size_t needle_len = strlen(needle);
+
+    for (const char *p = haystack; *p; p++) {
+        if (strncasecmp(p, needle, needle_len) == 0) {
+            return p;
+        }
+    }
+
+    return NULL;
+}
+
+static void extract_html_title(const char *html, char *out, size_t cap) {
+    if (!out || cap == 0) return;
+
+    out[0] = 0;
+
+    if (!html) return;
+
+    const char *start = find_case_insensitive(html, "<title");
+    if (!start) return;
+
+    start = strchr(start, '>');
+    if (!start) return;
+
+    start++;
+
+    const char *end = find_case_insensitive(start, "</title>");
+    if (!end) return;
+
+    size_t n = (size_t)(end - start);
+    if (n >= cap) n = cap - 1;
+
+    memcpy(out, start, n);
+    out[n] = 0;
+
+    trim_inplace(out);
+
+    /* Collapse whitespace inside the title. */
+    char *src = out;
+    char *dst = out;
+    bool in_space = false;
+
+    while (*src) {
+        if (isspace((unsigned char)*src)) {
+            if (!in_space) {
+                *dst++ = ' ';
+                in_space = true;
+            }
+        } else {
+            *dst++ = *src;
+            in_space = false;
+        }
+
+        src++;
+    }
+
+    *dst = 0;
+}
+
+
 /* ---------- HTML -> page_t ---------- */
 static page_t *html_to_page(const char *html, const char *base_url) {
     if (!html) return NULL;
@@ -258,6 +327,7 @@ static page_t *html_to_page(const char *html, const char *base_url) {
     strncpy(pg->base, base_url ? base_url : "", URL_MAX);
     pg->base[URL_MAX-1] = 0;
 
+    extract_html_title(html, pg->title, sizeof(pg->title));
     bool in_head=false, in_script=false, in_style=false;
     size_t o=0;
 
@@ -339,16 +409,97 @@ static page_t *html_to_page(const char *html, const char *base_url) {
                     }
 
                     while (i<L && html[i] != '>') i++;
-                } else if (!strcmp(tname,"br") || !strcmp(tname,"p")) {
-                    if (o && buf[o-1] != '\n') buf[o++] = '\n';
+                                    } else if (!strcmp(tname,"br")) {
+                    if (o && buf[o-1] != '\n') {
+                        buf[o++] = '\n';
+                    }
                     while (i<L && html[i] != '>') i++;
+
+                } else if (!strcmp(tname,"p") ||
+                           !strcmp(tname,"div") ||
+                           !strcmp(tname,"section") ||
+                           !strcmp(tname,"article") ||
+                           !strcmp(tname,"header") ||
+                           !strcmp(tname,"footer")) {
+
+                    if (o && buf[o-1] != '\n') {
+                        buf[o++] = '\n';
+                    }
+
+                    while (i<L && html[i] != '>') i++;
+
+                } else if (!strcmp(tname,"h1") ||
+                           !strcmp(tname,"h2") ||
+                           !strcmp(tname,"h3") ||
+                           !strcmp(tname,"h4") ||
+                           !strcmp(tname,"h5") ||
+                           !strcmp(tname,"h6")) {
+
+                    if (o && buf[o-1] != '\n') {
+                        buf[o++] = '\n';
+                    }
+
+                    if (o < L + MAX_LINKS*6 - 3) {
+                        buf[o++] = '=';
+                        buf[o++] = ' ';
+                    }
+
+                    while (i<L && html[i] != '>') i++;
+
+                } else if (!strcmp(tname,"li")) {
+
+                    if (o && buf[o-1] != '\n') {
+                        buf[o++] = '\n';
+                    }
+
+                    if (o < L + MAX_LINKS*6 - 3) {
+                        buf[o++] = '*';
+                        buf[o++] = ' ';
+                    }
+
+                    while (i<L && html[i] != '>') i++;
+
+                } else if (!strcmp(tname,"pre")) {
+
+                    if (o && buf[o-1] != '\n') {
+                        buf[o++] = '\n';
+                    }
+
+                    while (i<L && html[i] != '>') i++;
+
                 } else {
                     while (i<L && html[i] != '>') i++;
                 }
             } else {
-                if (!strcmp(tname,"head"))   in_head=false;
-                else if (!strcmp(tname,"script")) in_script=false;
-                else if (!strcmp(tname,"style"))  in_style=false;
+                if (!strcmp(tname,"head")) {
+                    in_head = false;
+
+                } else if (!strcmp(tname,"script")) {
+                    in_script = false;
+
+                } else if (!strcmp(tname,"style")) {
+                    in_style = false;
+
+                } else if (!strcmp(tname,"p") ||
+                           !strcmp(tname,"div") ||
+                           !strcmp(tname,"section") ||
+                           !strcmp(tname,"article") ||
+                           !strcmp(tname,"header") ||
+                           !strcmp(tname,"footer") ||
+                           !strcmp(tname,"li") ||
+                           !strcmp(tname,"h1") ||
+                           !strcmp(tname,"h2") ||
+                           !strcmp(tname,"h3") ||
+                           !strcmp(tname,"h4") ||
+                           !strcmp(tname,"h5") ||
+                           !strcmp(tname,"h6") ||
+                           !strcmp(tname,"pre")) {
+
+                    if (o && buf[o-1] != '\n') {
+                        buf[o++] = '\n';
+                    }
+                }
+
                 while (i<L && html[i] != '>') i++;
             }
 
@@ -416,7 +567,9 @@ static char *wrap_text(const char *in, int max_cols) {
 }
 
 /* ---------- curl fetch (tolerant to trimmed-down libcurl) ---------- */
-static int fetch_url(const char *url, mem_t *m) {
+/* ---------- v1.2: proper HTTP status/error handling ---------- */
+
+static int fetch_url(const char *url, mem_t *m, long *http_status) {
     if (!url || !m) return -1;
 
     CURL *curl = curl_easy_init();
@@ -424,6 +577,10 @@ static int fetch_url(const char *url, mem_t *m) {
 
     m->buf = NULL;
     m->len = 0;
+
+    if (http_status) {
+        *http_status = 0;
+    }
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
 
@@ -442,15 +599,6 @@ static int fetch_url(const char *url, mem_t *m) {
 #if defined(CURLOPT_HTTP_VERSION) && defined(CURL_HTTP_VERSION_1_1)
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 #endif
-#ifdef CURLOPT_ACCEPT_ENCODING
-    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
-#else
-#  ifdef CURLOPT_HTTPHEADER
-    struct curl_slist *hdrs = NULL;
-    hdrs = curl_slist_append(hdrs, "Accept-Encoding: identity");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-#  endif
-#endif
 #ifdef CURLOPT_CONNECTTIMEOUT
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
 #endif
@@ -464,30 +612,62 @@ static int fetch_url(const char *url, mem_t *m) {
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 20L);
 #endif
 
-/* Build explicit headers (works even if CURLOPT_USERAGENT is ignored) */
-struct curl_slist *hdrs = NULL;
-hdrs = curl_slist_append(hdrs,
-    "User-Agent: Mozilla/5.0 (BadgeVMS; ESP32; rv:1.1) "
-    "Gecko/20100101 "
-    "(compatible; MiniBrowser/1.1; +https://github.com/mactjaap/mini_browser/; HTTP/1.1; identity)");
-hdrs = curl_slist_append(hdrs,
-    "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-hdrs = curl_slist_append(hdrs, "Accept-Language: en-US,en;q=0.5");
-hdrs = curl_slist_append(hdrs, "Accept-Encoding: identity");
-curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    /*
+     * Explicit request headers.
+     *
+     * Accept-Encoding is deliberately "identity" because this tiny browser
+     * does not need compressed transfer encodings.
+     */
+    struct curl_slist *hdrs = NULL;
 
+    hdrs = curl_slist_append(hdrs,
+        "User-Agent: Mozilla/5.0 (BadgeVMS; ESP32; rv:1.3) "
+        "Gecko/20100101 "
+        "(compatible; MiniBrowser/1.3; +https://github.com/mactjaap/mini_browser/; HTTP/1.1; identity)");
 
+    hdrs = curl_slist_append(hdrs,
+        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
 
+    hdrs = curl_slist_append(hdrs,
+        "Accept-Language: en-US,en;q=0.5");
 
+    hdrs = curl_slist_append(hdrs,
+        "Accept-Encoding: identity");
+
+    if (hdrs) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    }
 
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, wr_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, m);
 
     CURLcode res = curl_easy_perform(curl);
 
+    /*
+     * Even when the HTTP server returns 404/500, curl itself can still
+     * return CURLE_OK. Therefore keep the HTTP status separately.
+     */
+    if (http_status) {
+        long code = 0;
+        if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code) == CURLE_OK) {
+            *http_status = code;
+        }
+    }
+
+    /*
+     * CURLOPT_HTTPHEADER does not take ownership of the curl_slist,
+     * so we must release it ourselves after curl_easy_perform().
+     */
+    if (hdrs) {
+        curl_slist_free_all(hdrs);
+        hdrs = NULL;
+    }
+
     curl_easy_cleanup(curl);
+
     return (res == CURLE_OK) ? 0 : (int)res;
 }
+
 
 /* ---------- tiny text renderer ---------- */
 static unsigned utf8_next(const char *s, size_t len, size_t *i) {
@@ -678,6 +858,8 @@ int main(void) {
     int  scroll_lines = 0;
     int  need_fetch = 1;
     int  sel_link = -1;
+    long last_http_status = 0;
+    bool url_editing = false;
 
 #if defined(ESP_PLATFORM)
     esp_log_level_set("ESP_CURL",        ESP_LOG_ERROR);
@@ -700,7 +882,8 @@ int main(void) {
     int running = 1;
     while (running) {
 
-        if (need_fetch) {
+         if (need_fetch) {
+            url_editing = false;
             trim_inplace(url_buf);
             if (!url_buf[0]) { need_fetch = 0; }
             else {
@@ -720,43 +903,145 @@ int main(void) {
                     draw_ui(ren, barline);
                     SDL_RenderPresent(ren);
 
+                    /* start edit v1.2 */
                     mem_t m = {0};
-                    int rc = fetch_url(url_buf, &m);
+                    long http_status = 0;
+
+                    int rc = fetch_url(url_buf, &m, &http_status);
+                    last_http_status = http_status;
+
                     if (rc != 0) {
-                        printf("[mini_browser] fetch error %d URL='%s'\n", rc, url_buf);
-                        if (page) { free(page->text); free(page); page=NULL; }
-                        free(content_wrapped); content_wrapped=NULL;
-                        sel_link=-1;
+                        printf("[mini_browser] fetch error %d URL='%s'\n",
+                               rc, url_buf);
+
+                        if (page) {
+                            free(page->text);
+                            free(page);
+                            page = NULL;
+                        }
+
+                        free(content_wrapped);
+                        content_wrapped = NULL;
+
+                        char error_text[512];
+                        snprintf(error_text, sizeof(error_text),
+                                 "NETWORK ERROR\n\n"
+                                 "Unable to load:\n%s\n\n"
+                                 "curl error: %d\n\n"
+                                 "Press WHY+R to retry.",
+                                 url_buf,
+                                 rc);
+
+                        content_wrapped = wrap_text(error_text, max_cols);
+                        scroll_lines = 0;
+                        sel_link = -1;
+
+                    } else if (http_status >= 400) {
+                        printf("[mini_browser] HTTP %ld URL='%s'\n",
+                               http_status, url_buf);
+
+                        if (page) {
+                            free(page->text);
+                            free(page);
+                            page = NULL;
+                        }
+
+                        free(content_wrapped);
+                        content_wrapped = NULL;
+
+                        char error_text[512];
+                        snprintf(error_text, sizeof(error_text),
+                                 "HTTP ERROR %ld\n\n"
+                                 "The server returned HTTP status %ld.\n\n"
+                                 "URL:\n%s\n\n"
+                                 "Press WHY+B to go back or WHY+R to retry.",
+                                 http_status,
+                                 http_status,
+                                 url_buf);
+
+                        content_wrapped = wrap_text(error_text, max_cols);
+                        scroll_lines = 0;
+                        sel_link = -1;
+
                     } else {
                         page_t *pg = html_to_page(m.buf ? m.buf : "", url_buf);
+
                         if (!pg) {
-                            if (page) { free(page->text); free(page); page=NULL; }
-                            free(content_wrapped); content_wrapped=NULL;
-                            sel_link=-1;
+                            if (page) {
+                                free(page->text);
+                                free(page);
+                                page = NULL;
+                            }
+
+                            free(content_wrapped);
+                            content_wrapped = NULL;
+
+                            char error_text[256];
+                            snprintf(error_text, sizeof(error_text),
+                                     "PARSE ERROR\n\n"
+                                     "The page was downloaded but could not "
+                                     "be converted to text.");
+
+                            content_wrapped = wrap_text(error_text, max_cols);
+                            scroll_lines = 0;
+                            sel_link = -1;
+
                         } else {
                             char *wrapped = wrap_text(pg->text, max_cols);
-                            free(content_wrapped); content_wrapped = wrapped;
-                            if (page) { free(page->text); free(page); }
+
+                            free(content_wrapped);
+                            content_wrapped = wrapped;
+
+                            if (page) {
+                                free(page->text);
+                                free(page);
+                            }
+
                             page = pg;
                             scroll_lines = 0;
                             sel_link = -1;
-                            printf("[mini_browser] parsed %d links from %s\n", page->link_count, url_buf);
+
+                            printf("[mini_browser] HTTP %ld, %u bytes, %d links from %s\n",
+                                   http_status,
+                                   (unsigned)m.len,
+                                   page->link_count,
+                                   url_buf);
 
                             if (wrapped) {
-                                printf("\n--- CONTENT START ---\n%s\n--- CONTENT END ---\n", wrapped);
+                                printf("\n--- CONTENT START ---\n%s\n--- CONTENT END ---\n",
+                                       wrapped);
                             }
                         }
                     }
+
                     free(m.buf);
+                    /* End edit v1.2 */
+
                 }
             }
             need_fetch = 0;
         }
 
         /* Compose bar text */
-        if (page && sel_link >= 0 && sel_link < page->link_count) {
+        if (url_editing) {
+            snprintf(barline, sizeof(barline), "%s", url_buf);
+
+        } else if (page && sel_link >= 0 && sel_link < page->link_count) {
             snprintf(barline, sizeof(barline), "[%d/%d]  %s",
-                     sel_link+1, page->link_count, page->links[sel_link].href);
+                     sel_link + 1,
+                     page->link_count,
+                     page->links[sel_link].href);
+
+        } else if (page && page->title[0] && last_http_status > 0) {
+            snprintf(barline, sizeof(barline), "%ld  %s",
+                     last_http_status,
+                     page->title);
+
+        } else if (last_http_status > 0) {
+            snprintf(barline, sizeof(barline), "%ld  %s",
+                     last_http_status,
+                     url_buf);
+
         } else {
             snprintf(barline, sizeof(barline), "%s", url_buf);
         }
@@ -822,15 +1107,25 @@ int main(void) {
                 if (sc == SC_SPECIAL_128) { strncpy(url_buf, SPECIAL_URL_128, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
                 if (sc == SC_SPECIAL_129) { strncpy(url_buf, SPECIAL_URL_129, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
 
-                /* Accelerator combos (E,H,R,Q,B) */
+                        
+                /* Accelerator combos (E,C,H,R,Q,B) */
                 if (accel_down) {
                     switch (sc) {
                         case SDL_SCANCODE_E:
                             strncpy(url_buf, "https://", URL_MAX);
                             url_buf[URL_MAX-1] = 0;
                             sel_link = -1;
+                            url_editing = true;
                             inhibit_text_once = true;
                             break;
+
+                        case SDL_SCANCODE_C:
+                            sel_link = -1;
+                            url_editing = true;
+                            inhibit_text_once = true;
+                            break;
+
+
                         case SDL_SCANCODE_H:
                             strncpy(url_buf, HOME_URL, URL_MAX);
                             url_buf[URL_MAX-1] = 0;

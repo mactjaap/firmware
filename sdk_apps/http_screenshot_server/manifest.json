@@ -1,0 +1,10 @@
+{
+    "unique_identifier": "http_screenshot_server",
+    "name": "Http_screenshot_server",
+    "author": "MacTjaap",
+    "version": "1",
+    "interpreter": "",
+    "metadata_file": "",
+    "binary_path": "http_screenshot_server.elf",
+    "source": 1
+}
