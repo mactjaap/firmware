@@ -621,9 +621,9 @@ static int fetch_url(const char *url, mem_t *m, long *http_status) {
     struct curl_slist *hdrs = NULL;
 
     hdrs = curl_slist_append(hdrs,
-        "User-Agent: Mozilla/5.0 (BadgeVMS; ESP32; rv:1.3) "
+        "User-Agent: Mozilla/5.0 (BadgeVMS; ESP32; rv:1.4) "
         "Gecko/20100101 "
-        "(compatible; MiniBrowser/1.3; +https://github.com/mactjaap/mini_browser/; HTTP/1.1; identity)");
+        "(compatible; MiniBrowser/1.4; +https://github.com/mactjaap/mini_browser/; HTTP/1.1; identity)");
 
     hdrs = curl_slist_append(hdrs,
         "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
@@ -860,6 +860,7 @@ int main(void) {
     int  sel_link = -1;
     long last_http_status = 0;
     bool url_editing = false;
+    size_t url_cursor = 0;
 
 #if defined(ESP_PLATFORM)
     esp_log_level_set("ESP_CURL",        ESP_LOG_ERROR);
@@ -882,10 +883,11 @@ int main(void) {
     int running = 1;
     while (running) {
 
-         if (need_fetch) {
+                if (need_fetch) {
             url_editing = false;
+            url_cursor = 0;
             trim_inplace(url_buf);
-            if (!url_buf[0]) { need_fetch = 0; }
+                if (!url_buf[0]) { need_fetch = 0; }
             else {
                 if (!has_scheme(url_buf) && !(url_buf[0]=='/' && url_buf[1]=='/')) {
                     normalize_typed_url(url_buf);
@@ -1023,10 +1025,21 @@ int main(void) {
         }
 
         /* Compose bar text */
+        /* Compose bar text */
         if (url_editing) {
-            snprintf(barline, sizeof(barline), "%s", url_buf);
+            size_t curlen = strlen(url_buf);
 
-        } else if (page && sel_link >= 0 && sel_link < page->link_count) {
+            if (url_cursor > curlen) {
+                url_cursor = curlen;
+            }
+
+            snprintf(barline, sizeof(barline),
+                     "%.*s|%s",
+                     (int)url_cursor,
+                     url_buf,
+                     url_buf + url_cursor);
+
+        } else if (page && sel_link >= 0 && sel_link < page->link_count) {            
             snprintf(barline, sizeof(barline), "[%d/%d]  %s",
                      sel_link + 1,
                      page->link_count,
@@ -1078,17 +1091,28 @@ int main(void) {
                     inhibit_text_once = false;
                     continue;
                 }
+
                 const char *t = ev.text.text;
-                if (is_printable_ascii(t)) {
+
+                if (url_editing && is_printable_ascii(t)) {
                     size_t curlen = strlen(url_buf);
+
+                    if (url_cursor > curlen) {
+                        url_cursor = curlen;
+                    }
+
                     if (curlen < URL_MAX - 1) {
-                        url_buf[curlen] = t[0];
-                        url_buf[curlen + 1] = 0;
+                        memmove(&url_buf[url_cursor + 1],
+                                &url_buf[url_cursor],
+                                curlen - url_cursor + 1);
+
+                        url_buf[url_cursor] = t[0];
+                        url_cursor++;
                         sel_link = -1;
                     }
                 }
             }
-
+            
             if (ev.type == SDL_EVENT_KEY_DOWN) {
                 SDL_Scancode sc = ev.key.scancode;
 
@@ -1114,17 +1138,17 @@ int main(void) {
                         case SDL_SCANCODE_E:
                             strncpy(url_buf, "https://", URL_MAX);
                             url_buf[URL_MAX-1] = 0;
+                            url_cursor = strlen(url_buf);
                             sel_link = -1;
                             url_editing = true;
                             inhibit_text_once = true;
                             break;
-
                         case SDL_SCANCODE_C:
+                            url_cursor = strlen(url_buf);
                             sel_link = -1;
                             url_editing = true;
                             inhibit_text_once = true;
                             break;
-
 
                         case SDL_SCANCODE_H:
                             strncpy(url_buf, HOME_URL, URL_MAX);
@@ -1163,28 +1187,99 @@ int main(void) {
                     /* URL actions */
                     case SDL_SCANCODE_RETURN:
                     case SDL_SCANCODE_KP_ENTER:
-                        if (page && sel_link >= 0 && sel_link < page->link_count) {
-                            strncpy(url_buf, page->links[sel_link].href, URL_MAX);
-                            url_buf[URL_MAX-1]=0;
+                        if (url_editing) {
+                            url_editing = false;
                             need_fetch = 1;
+
+                        } else if (page && sel_link >= 0 &&
+                                   sel_link < page->link_count) {
+
+                            strncpy(url_buf,
+                                    page->links[sel_link].href,
+                                    URL_MAX);
+
+                            url_buf[URL_MAX-1] = 0;
+                            need_fetch = 1;
+
                         } else {
                             need_fetch = 1;
                         }
                         break;
+                    case SDL_SCANCODE_BACKSPACE:
+                        if (url_editing) {
+                            size_t curlen = strlen(url_buf);
 
-                    case SDL_SCANCODE_BACKSPACE: {
-                        size_t curlen = strlen(url_buf);
-                        if (curlen) url_buf[curlen - 1] = 0;
-                        sel_link = -1;
+                            if (url_cursor > curlen) {
+                                url_cursor = curlen;
+                            }
+
+                            if (url_cursor > 0) {
+                                memmove(&url_buf[url_cursor - 1],
+                                        &url_buf[url_cursor],
+                                        curlen - url_cursor + 1);
+
+                                url_cursor--;
+                            }
+
+                            sel_link = -1;
+                        }
                         break;
-                    }
+
+                    case SDL_SCANCODE_DELETE:
+                        if (url_editing) {
+                            size_t curlen = strlen(url_buf);
+
+                            if (url_cursor > curlen) {
+                                url_cursor = curlen;
+                            }
+
+                            if (url_cursor < curlen) {
+                                memmove(&url_buf[url_cursor],
+                                        &url_buf[url_cursor + 1],
+                                        curlen - url_cursor);
+                            }
+
+                            sel_link = -1;
+                        }
+                        break;
+
+                    case SDL_SCANCODE_LEFT:
+                        if (url_editing) {
+                            if (url_cursor > 0) {
+                                url_cursor--;
+                            }
+                        }
+                        break;
+
+                    case SDL_SCANCODE_RIGHT:
+                        if (url_editing) {
+                            size_t curlen = strlen(url_buf);
+
+                            if (url_cursor < curlen) {
+                                url_cursor++;
+                            }
+                        }
+                        break;
+
+                    case SDL_SCANCODE_END:
+                        if (url_editing) {
+                            url_cursor = strlen(url_buf);
+                        }
+                        break;
 
                     /* Scrolling */
+                    
                     case SDL_SCANCODE_DOWN:
                     case SDL_SCANCODE_J: scroll_lines++; break;
                     case SDL_SCANCODE_UP:
                     case SDL_SCANCODE_K: if (scroll_lines>0) scroll_lines--; break;
-                    case SDL_SCANCODE_HOME: scroll_lines = 0; break;
+                    case SDL_SCANCODE_HOME:
+                        if (url_editing) {
+                            url_cursor = 0;
+                        } else {
+                            scroll_lines = 0;
+                        }
+                        break;
                     case SDL_SCANCODE_PAGEDOWN: {
                         int lpp = (VIEW_H - PAD_TOP - PAD_BOTTOM) / (CH_H + LINE_SPACING);
                         scroll_lines += lpp > 2 ? lpp - 2 : 1;
