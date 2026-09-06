@@ -34,6 +34,10 @@
 #define LINE_SPACING  2
 #define MAX_LINKS     128
 
+/* --- Scroll repeat constants for hold-to-scroll --- */
+#define SCROLL_REPEAT_DELAY_MS 300
+#define SCROLL_REPEAT_INTERVAL_MS 55
+
 /* --- Icon placement inside URL bar --- */
 #define ICON_LEFT   2
 #define ICON_TOP    2
@@ -1032,28 +1036,64 @@ static page_t *bookmarks_to_page(void) {
     return pg;
 }
 
-/* ---------- history (for WHY + B) ---------- */
+/* ---------- history with Back/Forward navigation ---------- */
 #define HISTORY_MAX 32
 static char g_hist[HISTORY_MAX][URL_MAX];
 static int  g_hist_len = 0;
+static int  g_hist_pos = -1;  /* -1 = nothing, 0..len-1 = current entry index */
+
+/*
+ * INVARIANT: g_hist_pos is the zero-based index of the currently displayed
+ * history entry. g_hist_len is the total number of entries.
+ *
+ * Example: HOME -> A -> B -> C
+ * g_hist[0] = HOME, g_hist[1] = A, g_hist[2] = B, g_hist[3] = C
+ * g_hist_len = 4, g_hist_pos = 3 (pointing at C)
+ */
 
 static void history_push(const char *u) {
     if (!u || !*u) return;
-    if (g_hist_len > 0 && strncmp(g_hist[g_hist_len - 1], u, URL_MAX) == 0) return; /* no dup consec */
+    
+    /* Case A: duplicate of current entry - do nothing */
+    if (g_hist_pos >= 0 && strncmp(g_hist[g_hist_pos], u, URL_MAX) == 0) {
+        return;
+    }
+    
+    /* Case B: user was in forward state, truncate forward branch */
+    if (g_hist_pos < g_hist_len - 1) {
+        g_hist_len = g_hist_pos + 1;
+    }
+    
+    /* Case C/D: append new entry */
     if (g_hist_len < HISTORY_MAX) {
+        /* Normal append */
         strncpy(g_hist[g_hist_len], u, URL_MAX);
         g_hist[g_hist_len][URL_MAX-1] = 0;
+        g_hist_pos = g_hist_len;
         g_hist_len++;
     } else {
+        /* Full: shift down, append at end */
         memmove(g_hist, g_hist + 1, sizeof(g_hist[0]) * (HISTORY_MAX - 1));
         strncpy(g_hist[HISTORY_MAX - 1], u, URL_MAX);
         g_hist[HISTORY_MAX - 1][URL_MAX - 1] = 0;
+        if (g_hist_pos > 0) g_hist_pos--;
+        g_hist_pos = HISTORY_MAX - 1;
+        g_hist_len = HISTORY_MAX;
     }
 }
+
 static int history_back(char *out) {
-    if (g_hist_len <= 1) return 0;        /* nowhere to go */
-    g_hist_len--;                          /* drop current */
-    strncpy(out, g_hist[g_hist_len - 1], URL_MAX);
+    if (g_hist_pos <= 0) return 0;  /* Can't go back from first entry */
+    g_hist_pos--;
+    strncpy(out, g_hist[g_hist_pos], URL_MAX);
+    out[URL_MAX - 1] = 0;
+    return 1;
+}
+
+static int history_forward(char *out) {
+    if (g_hist_pos < 0 || g_hist_pos + 1 >= g_hist_len) return 0;
+    g_hist_pos++;
+    strncpy(out, g_hist[g_hist_pos], URL_MAX);
     out[URL_MAX - 1] = 0;
     return 1;
 }
@@ -1108,6 +1148,19 @@ int main(void) {
     char status_message[64] = "";
     Uint64 status_message_until = 0;
 
+    /* Hold-to-scroll state for UP/DOWN arrow keys */
+    bool scroll_up_held = false;
+    bool scroll_down_held = false;
+    Uint64 scroll_repeat_at = 0;
+
+    /* Numbered link navigation state */
+    char link_number_buf[8] = "";
+    int link_number_len = 0;
+    bool link_number_mode = false;
+
+    /* History navigation flag - true when restoring from Back/Forward */
+    bool history_navigation = false;
+
 #if defined(ESP_PLATFORM)
     esp_log_level_set("ESP_CURL",        ESP_LOG_ERROR);
     esp_log_level_set("HTTP_CLIENT",     ESP_LOG_ERROR);
@@ -1132,6 +1185,9 @@ int main(void) {
                 if (need_fetch) {
             url_editing = false;
             url_cursor = 0;
+            link_number_mode = false;
+            link_number_len = 0;
+            link_number_buf[0] = '\0';
             trim_inplace(url_buf);
                 if (!url_buf[0]) { need_fetch = 0; }
             else {
@@ -1144,8 +1200,11 @@ int main(void) {
                     strncpy(url_buf, tmp, URL_MAX); url_buf[URL_MAX-1]=0;
                 }
                 if (is_http_scheme(url_buf)) {
-                    /* record in history just before fetching */
-                    history_push(url_buf);
+                    /* record in history just before fetching (unless reloading) */
+                    if (!history_navigation) {
+                        history_push(url_buf);
+                    }
+                    history_navigation = false;
 
                     snprintf(barline, sizeof(barline), "%s", url_buf);
                     draw_ui(ren, barline);
@@ -1272,13 +1331,18 @@ int main(void) {
             need_fetch = 0;
         }
 
-        /* Compose bar text */
+/* Compose bar text */
         if (status_message[0] &&
             SDL_GetTicks() < status_message_until) {
 
             snprintf(barline, sizeof(barline),
-                     "%s",
-                     status_message);
+                      "%s",
+                      status_message);
+
+        } else if (link_number_mode && link_number_len > 0) {
+            snprintf(barline, sizeof(barline),
+                      "%s",
+                      link_number_buf);
 
         } else if (url_editing) {
             size_t curlen = strlen(url_buf);
@@ -1349,7 +1413,19 @@ int main(void) {
 
                 const char *t = ev.text.text;
 
-                if (url_editing && is_printable_ascii(t)) {
+                /* Capture digits for link number entry */
+                if (page && page->link_count > 0 && t[0] >= '0' && t[0] <= '9') {
+                    if (!link_number_mode) {
+                        link_number_mode = true;
+                        link_number_len = 0;
+                        link_number_buf[0] = '\0';
+                    }
+                    if (link_number_len < (int)sizeof(link_number_buf) - 1) {
+                        link_number_buf[link_number_len++] = t[0];
+                        link_number_buf[link_number_len] = '\0';
+                    }
+                }
+                else if (url_editing && is_printable_ascii(t)) {
                     size_t curlen = strlen(url_buf);
 
                     if (url_cursor > curlen) {
@@ -1379,12 +1455,12 @@ int main(void) {
                 }
 
                 /* Special one-shot keys -> direct navigate */
-                if (sc == SC_SPECIAL_124) { strncpy(url_buf, SPECIAL_URL_124, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_125) { strncpy(url_buf, SPECIAL_URL_125, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_126) { strncpy(url_buf, SPECIAL_URL_126, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_127) { strncpy(url_buf, SPECIAL_URL_127, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_128) { strncpy(url_buf, SPECIAL_URL_128, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
-                if (sc == SC_SPECIAL_129) { strncpy(url_buf, SPECIAL_URL_129, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
+                if (sc == SC_SPECIAL_124) {  strncpy(url_buf, SPECIAL_URL_124, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
+                if (sc == SC_SPECIAL_125) {  strncpy(url_buf, SPECIAL_URL_125, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
+                if (sc == SC_SPECIAL_126) {  strncpy(url_buf, SPECIAL_URL_126, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
+                if (sc == SC_SPECIAL_127) {  strncpy(url_buf, SPECIAL_URL_127, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
+                if (sc == SC_SPECIAL_128) {  strncpy(url_buf, SPECIAL_URL_128, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
+                if (sc == SC_SPECIAL_129) {  strncpy(url_buf, SPECIAL_URL_129, URL_MAX); url_buf[URL_MAX-1]=0; need_fetch=1; sel_link=-1; inhibit_text_once=true; continue; }
 
                  
                 /* Accelerator combos (E,C,H,R,F,M,B,Q) */       
@@ -1396,23 +1472,31 @@ int main(void) {
                             url_cursor = strlen(url_buf);
                             sel_link = -1;
                             url_editing = true;
+                            link_number_mode = false;
+                            link_number_len = 0;
+                            link_number_buf[0] = '\0';
                             inhibit_text_once = true;
                             break;
                         case SDL_SCANCODE_C:
                             url_cursor = strlen(url_buf);
                             sel_link = -1;
                             url_editing = true;
+                            link_number_mode = false;
+                            link_number_len = 0;
+                            link_number_buf[0] = '\0';
                             inhibit_text_once = true;
                             break;
 
                         case SDL_SCANCODE_H:
+                            
                             strncpy(url_buf, HOME_URL, URL_MAX);
                             url_buf[URL_MAX-1] = 0;
                             need_fetch = 1;
                             sel_link = -1;
                             inhibit_text_once = true;
                             break;
-                                                    case SDL_SCANCODE_R:
+                        case SDL_SCANCODE_R:
+                            history_navigation = true;
                             need_fetch = 1;
                             inhibit_text_once = true;
                             break;
@@ -1506,6 +1590,7 @@ int main(void) {
                                 bookmark_return_url[0] = 0;
 
                                 viewing_bookmarks = false;
+                                history_navigation = true;
                                 need_fetch = 1;
                                 sel_link = -1;
 
@@ -1515,11 +1600,25 @@ int main(void) {
                                 if (history_back(prev)) {
                                     strncpy(url_buf, prev, URL_MAX);
                                     url_buf[URL_MAX-1] = 0;
+                                    history_navigation = true;
                                     need_fetch = 1;
                                     sel_link = -1;
                                 }
                             }
 
+                            inhibit_text_once = true;
+                            break;
+                        }
+
+                        case SDL_SCANCODE_G: { /* FORWARD */
+                            char next_url[URL_MAX];
+                            if (history_forward(next_url)) {
+                                strncpy(url_buf, next_url, URL_MAX);
+                                url_buf[URL_MAX-1] = 0;
+                                history_navigation = true;
+                                need_fetch = 1;
+                                sel_link = -1;
+                            }
                             inhibit_text_once = true;
                             break;
                         }
@@ -1542,11 +1641,31 @@ int main(void) {
                     case SDL_SCANCODE_KP_ENTER:
                         if (url_editing) {
                             url_editing = false;
+                            link_number_mode = false;
+                            link_number_len = 0;
+                            link_number_buf[0] = '\0';
                             need_fetch = 1;
+                        } else if (link_number_mode && page && page->link_count > 0) {
+                            /* Open link by number */
+                            int link_num = atoi(link_number_buf);
+                            if (link_num >= 1 && link_num <= page->link_count && link_num <= 128) {
+                                
+                                strncpy(url_buf,
+                                        page->links[link_num - 1].href,
+                                        URL_MAX);
+                                url_buf[URL_MAX-1] = 0;
+                                viewing_bookmarks = false;
+                                bookmark_return_url[0] = 0;
+                                need_fetch = 1;
+                            }
+                            link_number_mode = false;
+                            link_number_len = 0;
+                            link_number_buf[0] = '\0';
 
                         } else if (page && sel_link >= 0 &&
                                    sel_link < page->link_count) {
 
+                            
                             strncpy(url_buf,
                                     page->links[sel_link].href,
                                     URL_MAX);
@@ -1563,6 +1682,7 @@ int main(void) {
                             need_fetch = 1;
 
                         } else {
+                            
                             need_fetch = 1;
                         }
                         break;
@@ -1622,17 +1742,37 @@ int main(void) {
                         }
                         break;
 
-                    case SDL_SCANCODE_END:
+case SDL_SCANCODE_END:
                         if (url_editing) {
                             url_cursor = strlen(url_buf);
                         }
                         break;
 
+                    /* Numbered link navigation: digits handled via TEXT_INPUT */
+
                     /* Scrolling */
                     
                     case SDL_SCANCODE_DOWN:
+                        if (!url_editing) {
+                            if (!scroll_down_held) {
+                                scroll_down_held = true;
+                                scroll_up_held = false;
+                                scroll_lines++;
+                                scroll_repeat_at = SDL_GetTicks() + SCROLL_REPEAT_DELAY_MS;
+                            }
+                        }
+                        break;
                     case SDL_SCANCODE_J: scroll_lines++; break;
                     case SDL_SCANCODE_UP:
+                        if (!url_editing) {
+                            if (!scroll_up_held) {
+                                scroll_up_held = true;
+                                scroll_down_held = false;
+                                if (scroll_lines > 0) scroll_lines--;
+                                scroll_repeat_at = SDL_GetTicks() + SCROLL_REPEAT_DELAY_MS;
+                            }
+                        }
+                        break;
                     case SDL_SCANCODE_K: if (scroll_lines>0) scroll_lines--; break;
                     case SDL_SCANCODE_HOME:
                         if (url_editing) {
@@ -1667,8 +1807,34 @@ case SDL_SCANCODE_TAB: {
     }
     break;
 }
-                    case SDL_SCANCODE_ESCAPE: running = 0; break;
-                    default: break;
+                    case SDL_SCANCODE_ESCAPE:
+                        if (link_number_mode) {
+                            link_number_mode = false;
+                            link_number_len = 0;
+                            link_number_buf[0] = '\0';
+                        } else {
+                            running = 0;
+                        }
+                        break;
+                    /* Digit keys: handled via TEXT_INPUT, just break here */
+                    case SDL_SCANCODE_1:
+                    case SDL_SCANCODE_2:
+                    case SDL_SCANCODE_3:
+                    case SDL_SCANCODE_4:
+                    case SDL_SCANCODE_5:
+                    case SDL_SCANCODE_6:
+                    case SDL_SCANCODE_7:
+                    case SDL_SCANCODE_8:
+                    case SDL_SCANCODE_9:
+                    case SDL_SCANCODE_0:
+                        break;
+                    default:
+                        if (link_number_mode) {
+                            link_number_mode = false;
+                            link_number_len = 0;
+                            link_number_buf[0] = '\0';
+                        }
+                        break;
                 }
             } /* KEY_DOWN */
 
@@ -1676,9 +1842,25 @@ case SDL_SCANCODE_TAB: {
                 if (ev.key.scancode == SC_ACCELERATOR) {
                     accel_down = false;
                     inhibit_text_once = false;
+                } else if (ev.key.scancode == SDL_SCANCODE_UP) {
+                    scroll_up_held = false;
+                } else if (ev.key.scancode == SDL_SCANCODE_DOWN) {
+                    scroll_down_held = false;
                 }
             }
         } /* while events */
+
+        /* Timed scroll repeat for held arrow keys */
+        if (!url_editing) {
+            Uint64 now = SDL_GetTicks();
+            if (scroll_down_held && now >= scroll_repeat_at) {
+                scroll_lines++;
+                scroll_repeat_at = now + SCROLL_REPEAT_INTERVAL_MS;
+            } else if (scroll_up_held && now >= scroll_repeat_at) {
+                if (scroll_lines > 0) scroll_lines--;
+                scroll_repeat_at = now + SCROLL_REPEAT_INTERVAL_MS;
+            }
+        }
 
         SDL_Delay(10);
     }
