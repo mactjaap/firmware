@@ -1,422 +1,579 @@
-# Mini Browser 2.3
+# MacTjaap WHY2025 BadgeVMS Firmware
 
-A compact, interactive, text-oriented web browser for the WHY2025 badge.
+This repository contains my customized build of **BadgeVMS** for the
+ESP32-P4 based WHY2025 badge.
 
-Mini Browser is written in C using SDL3 and libcurl. It retrieves HTML pages, converts them into readable text, extracts links and simple HTML forms, and provides a keyboard-driven browsing interface designed for the 720×720 WHY2025 badge display.
+It is based on the original WHY2025 BadgeVMS firmware, but includes my
+own launcher/UI changes, application selection and ordering, and the
+latest **Mini Browser 2.3** with extended Unicode support.
 
-Version **2.3** adds broad Unicode rendering, monochrome Plane-1 emoji, UTF-8-safe pixel-aware wrapping, and genuine rendered bold text for HTML `<b>` and `<strong>`, while retaining the link navigation, bookmarks, Back/Forward history and GET forms from earlier releases.
+![BadgeVMS Logo](misc/BadgeVMS.png)
 
-Mini Browser deliberately does **not** try to be a modern graphical browser. There is no JavaScript engine, CSS layout engine, image renderer, or full DOM. The goal is a small, fast browser for text-oriented and lightweight websites.
+## What is different in this build?
 
-## Highlights
+The goal of this fork is to provide a polished, useful everyday BadgeVMS
+installation with a cleaner application launcher and a strong set of
+preinstalled applications.
 
-- Text-oriented HTML browsing over HTTP and HTTPS
-- Up to 64 KiB downloaded per page
-- Up to 128 extracted links and 160 interactive actions
-- Numbered navigation for links and form controls
-- Back and Forward browsing history
-- Persistent bookmarks
-- Editable URL bar
-- Hold Up/Down for fast scrolling
-- Simple GET form support
-- UTF-8-safe text processing and wrapping
-- Pixel-aware wrapping for mixed ASCII and Unicode text
-- Broad Unicode support using a generated GNU Unifont bitmap file
-- 27,696 generated Unicode glyphs across selected Plane 0 and Plane 1 ranges
-- CJK, Greek, Cyrillic, punctuation, symbols and many other scripts/blocks
-- Monochrome single-codepoint emoji
-- Real rendered bold for `<b>` and `<strong>`
-- ASCII `*` markers for unordered lists, so list markers remain usable without the external Unicode font
-- Small built-in 5×7 ASCII bitmap font
-- No JavaScript, CSS layout or image rendering required
+### Customized launcher and UI
 
-## Unicode and text rendering
+The launcher has been reworked from the original BadgeVMS presentation.
+Changes include:
 
-ASCII uses the browser's built-in bitmap font. Additional Unicode characters are loaded from:
+-   A customized dark launcher/interface.
+-   Custom application icons.
+-   A full-screen application menu designed for the badge's 720x720
+    display.
+-   Improved application ordering, with frequently used applications
+    placed prominently.
+-   **Mini Browser** is presented as one of the primary applications.
+-   Launcher/internal support applications that do not need to be
+    started manually are hidden from the normal application list.
+-   Updated About/information presentation and launcher navigation.
 
-    APPS:[mini_browser]unifont_cjk.bin
+### Mini Browser 2.3
 
-The generated font is based on GNU Unifont 17.0.02 and combines selected glyphs from the Japanese Plane-0 font and the supplementary-plane font.
+This firmware includes **Mini Browser 2.3**, my lightweight browser
+designed specifically for BadgeVMS.
 
-The current generated font contains **27,696 glyphs** and covers broad ranges including Latin extensions, Greek, Cyrillic, punctuation, currency symbols, arrows, mathematical symbols, box drawing, geometric shapes, CJK punctuation, Hiragana, Katakana, CJK ideographs, fullwidth forms and selected supplementary symbol/emoji blocks.
+Mini Browser 2.3 includes:
 
-UTF-8 wrapping is code-point safe: Mini Browser does not intentionally split a multi-byte UTF-8 sequence when wrapping page text. Wrapping is also pixel-aware, accounting for the different rendered widths of the built-in ASCII font and 16×16 Unicode glyphs.
+-   HTTP and HTTPS browsing using libcurl.
+-   HTML text rendering.
+-   Link discovery and numbered link navigation.
+-   Back and Forward history.
+-   Persistent bookmarks.
+-   HTML GET forms, including text, search, URL, hidden and submit
+    fields.
+-   UTF-8-safe text processing.
+-   Pixel-aware line wrapping for mixed-width text.
+-   Broad Unicode support using an external GNU Unifont-derived bitmap
+    font.
+-   27,696 Unicode glyphs in the generated font.
+-   Japanese, Chinese, Greek, Cyrillic, punctuation, mathematical
+    symbols and many other Unicode ranges.
+-   Monochrome single-codepoint Plane-1 emoji.
+-   Real rendered bold text for HTML `<b>` and `<strong>`.
+-   Compatibility-friendly ASCII list markers when the external Unicode
+    font is unavailable.
 
-If the external Unicode font is not installed, the built-in ASCII renderer remains available. Unordered HTML list items intentionally use the ASCII `*` marker rather than requiring a Unicode bullet.
+The Unicode font is included in the firmware storage so a normal
+build/flash of this firmware provides the extended Mini Browser
+character set.
 
-## Bold text
+Complex color emoji, ZWJ emoji sequences, JavaScript, CSS layout and
+graphical web pages are intentionally outside the scope of Mini Browser.
+It is designed as a fast, text-oriented browser for the badge.
 
-HTML `<b>` and `<strong>` are rendered as genuine bold text rather than as visible Markdown-style `**` markers.
+Mini Browser development is also maintained separately at:
 
-Mini Browser implements this in the renderer by drawing bold glyphs with an additional one-pixel horizontal pass. This works with both the built-in ASCII glyphs and glyphs loaded from the Unicode font.
+https://github.com/mactjaap/mini_browser
 
-## Emoji
+## BadgeVMS
 
-Mini Browser 2.3 can render many supplementary-plane, single-codepoint emoji as monochrome GNU Unifont bitmap glyphs.
+BadgeVMS is an operating environment for the WHY2025 badge.
 
-Examples include:
+Some of its main features are:
 
-    😀 😃 😂 😎 🤖
-    👍 👋 🙏
-    🐶 🐱 🐼
-    🍎 🍕 ☕
-    🚗 ✈ 🚀
-    🌍 🌙 🔥
-    💡 💻 🔑
+-   Multiple programs can run at once.
+-   Every program gets its own linear address space.
+-   Programs are isolated from each other, although not from the
+    operating system itself.
+-   VMS-style paths and search lists.
+-   Applications are loaded as position-independent RISC-V ELF binaries.
+-   SDL2 and SDL3 are available to applications through the BadgeVMS
+    SDK.
 
-This is bitmap Unicode rendering, not a color emoji engine.
+## Supported hardware
 
-Mini Browser does not currently compose complex emoji sequences such as ZWJ sequences, skin-tone combinations, gender sequences or regional-indicator flag pairs. Variation-selector handling is also limited.
+-   WHY2025 badge (ESP32-P4 based)
 
-## HTML forms
+## Building the firmware
 
-Mini Browser supports simple interactive HTML GET forms.
+This firmware is built using **ESP-IDF 5.5**.
 
-Supported form controls include:
+Activate your ESP-IDF environment first. For example:
 
-- `<input type="text">`
-- `<input type="search">`
-- `<input type="url">`
-- `<input type="hidden">`
-- `<input type="submit">`
-- `<button>`
-- `<button type="submit">`
+``` sh
+. ~/esp-idf/export.sh
+```
 
-Links and visible form controls share the same numbered action system. Type the action number and press Enter to activate it.
+Then build the firmware:
 
-GET submissions use URL encoding compatible with `application/x-www-form-urlencoded`. Hidden fields are included, disabled fields are ignored, and the activated named submit button is included where appropriate.
+``` sh
+idf.py build
+```
 
-Up to 4 forms with up to 8 stored fields per form are supported.
+To build, flash and open the serial monitor:
 
-POST forms are recognised but intentionally not submitted. Complex controls such as `textarea`, `select`, checkboxes, radio buttons, file uploads and JavaScript-driven forms are not currently supported.
+``` sh
+idf.py build flash monitor
+```
 
-## HTML rendering
+Or specify the serial device explicitly, for example:
 
-Mini Browser converts useful HTML structure into a compact text representation.
+``` sh
+idf.py -p /dev/ttyUSB0 flash monitor
+```
 
-Supported or specially handled elements include headings, paragraphs, line breaks, ordered and unordered lists, preformatted text, inline code, bold/strong text, emphasis/italic text, horizontal rules, simple table rows/cells, hyperlinks, simple forms, named HTML entities, and decimal/hexadecimal numeric entities.
+> **Important:** this firmware has been developed and tested with the
+> WHY2025 ESP32-P4 badge configuration. Do not casually regenerate the
+> project configuration or run `idf.py set-target esp32p4` on an
+> existing working checkout. The WHY2025 badge hardware/configuration
+> must be preserved.
 
-Unordered list items use `* ` as their marker. This is intentional: the marker works with the built-in ASCII font even when the optional external Unicode font is not installed.
+When pulling firmware changes that modify `sdkconfig.defaults`, a clean
+rebuild may be necessary:
 
-Comments, doctypes, scripts, styles and document head content are ignored for normal page rendering. The page `<title>` is extracted for the top bar.
-
-## Navigation
-
-Every usable link or visible form control receives an action number. Type the number and press Enter to activate it.
-
-### Keyboard controls
+``` sh
+idf.py fullclean
+idf.py build
+```
 
-| Key | Action |
-| --- | --- |
-| `0`–`9` + Enter | Activate a numbered link or form action |
-| `Enter` | Activate / accept editing |
-| `Up` / `Down` | Scroll one line; hold for continuous scrolling |
-| `J` / `K` | Scroll down / up one line |
-| `Left` / `Right` | Move cursor while editing |
-| `Backspace` | Delete while editing |
 
-The WHY2025 key acts as the browser accelerator:
+## Testing Mini Browser from macOS
 
-| Shortcut | Action |
-| --- | --- |
-| `WHY+E` | Enter a new URL |
-| `WHY+C` | Edit the current URL |
-| `WHY+H` | Home |
-| `WHY+R` | Reload |
-| `WHY+B` | Back |
-| `WHY+G` | Forward |
-| `WHY+F` | Add/remove current bookmark |
-| `WHY+M` | Open bookmarks |
-| `WHY+Q` | Quit |
+This firmware includes a serial keyboard bridge that can inject keyboard
+events into the normal BadgeVMS keyboard/event path. This makes it
+possible to control Mini Browser from a Mac and to run repeatable browser
+regression tests after firmware or application changes.
 
-## Bookmarks and history
+Three Python scripts are provided:
 
-Mini Browser stores up to 32 bookmarks and keeps up to 32 HTTP/HTTPS history entries.
+-   `badge_keyboard.py` - use the Mac keyboard interactively on the
+    badge.
+-   `test_minibrowser_sites_and_searches.py` - fixed Mini Browser
+    regression/smoke-test suite.
+-   `test_minibrowser_configurable_test.py` - configurable test runner
+    for additional websites, searches and browser commands.
 
-`WHY+B` moves backward and `WHY+G` moves forward. Navigating to a new page after going Back truncates the old forward branch. Reloading does not create a duplicate history entry, and GET form submissions participate in the same history.
+All three scripts communicate with the badge over the serial connection
+at 115200 baud.
 
-Bookmark data is stored at:
+They require Python 3 and `pyserial`:
 
-    APPS:[mini_browser]bookmarks.txt
+``` sh
+python3 -m pip install pyserial
+```
 
-## Networking
+On macOS, check the available serial devices with:
 
-Mini Browser uses libcurl and requests HTTP/1.1 where available. It requests uncompressed transfer data with:
+``` sh
+ls /dev/cu.*
+```
 
-    Accept-Encoding: identity
+The supplied scripts currently use:
 
-Redirect following is bounded. Network failures and HTTP errors are shown as readable browser pages.
+``` text
+/dev/cu.wchusbserial10
+```
 
-## Limits
+If your badge appears under another device name, change the serial
+device near the top of the relevant script.
 
-| Resource | Limit |
-| --- | ---: |
-| Downloaded page data | 64 KiB |
-| URL length | 256 bytes |
-| Links | 128 |
-| Interactive actions | 160 |
-| Forms per page | 4 |
-| Fields per form | 8 |
-| Editable form value | 127 characters |
-| Bookmarks | 32 |
-| History entries | 32 |
+Only one program should have the serial device open at a time. Close
+`idf.py monitor`, `minicom`, another serial terminal, or another test
+script before starting one of these tools.
 
-## What Mini Browser does not support
+### Serial keyboard protocol
 
-Mini Browser does not currently provide JavaScript execution, CSS layout/styling, images, video/audio, POST form submission, file uploads, complex HTML form controls, a complete HTML5 DOM/parser, color emoji, or complex emoji composition.
+The scripts send synthetic keyboard events using a simple line-oriented
+serial protocol:
 
-Simple server-rendered websites and text-oriented sites work best.
+``` text
+E <scancode-hex> <down> <text-hex>
+```
 
-## Architecture
+For example, pressing and releasing Enter is sent as:
 
-    URL
-      |
-      v
-    libcurl HTTP fetch
-      |
-      v
-    bounded HTML-to-text parser
-      |
-      +--> links
-      +--> forms
-      +--> title
-      +--> formatting markers
-      |
-      v
-    UTF-8-safe, pixel-aware wrapping
-      |
-      v
-    numbered action model
-      |
-      v
-    SDL3 renderer
-      |
-      +--> built-in ASCII glyphs
-      +--> external Unicode glyphs
-      +--> real bold rendering
+``` text
+E 28 1 00
+E 28 0 00
+```
 
-## Unicode font generation
+The firmware-side keyboard driver converts these messages into normal
+BadgeVMS keyboard events. From that point onward they follow the same
+event path as the physical badge keyboard, through BadgeVMS and SDL3 to
+Mini Browser.
 
-The external font asset is generated from GNU Unifont 17.0.02 sources. The tested 2.3 font combines:
-
-    unifont_jp-17.0.02.hex
-    unifont_upper-17.0.02.hex
-
-into:
-
-    unifont_cjk.bin
-
-The generated binary contains 27,696 usable glyphs in the selected ranges.
-
-GNU Unifont is dual-licensed under the SIL Open Font License 1.1 and GNU GPL version 2 or later with the GNU Font Embedding Exception. When redistributing the generated font asset, include the applicable GNU Unifont licensing and attribution material.
-
-## Testing and macOS keyboard bridge
-
-The repository includes three Python utilities for driving and testing Mini Browser through the badge's serial keyboard bridge:
-
-- `badge_keyboard.py` — interactive macOS keyboard control
-- `test_minibrowser_sites_and_searches.py` — fixed automated regression suite
-- `test_minibrowser_configurable_test.py` — configurable automated test runner
-
-The scripts use the serial keyboard event protocol implemented by the WHY2025 BadgeVMS keyboard driver. They send synthetic keyboard events over the badge's serial connection; BadgeVMS then delivers those events through the normal keyboard/event path to SDL3 and Mini Browser. The physical badge keyboard remains usable.
-
-The scripts require Python 3 and pyserial:
-
-    python3 -m pip install pyserial
-
-By default the supplied scripts use:
-
-    /dev/cu.wchusbserial10
-    115200 baud
-
-Change the serial device in the script if the badge appears under another device name. On macOS, available serial devices can be checked with:
-
-    ls /dev/cu.*
-
-Only one program should have the serial device open at a time. Stop a serial monitor or another test script before starting one of these tools.
+The physical keyboard remains usable.
 
 ### badge_keyboard.py
 
-`badge_keyboard.py` turns the Mac keyboard into an interactive keyboard for the WHY2025 badge.
+`badge_keyboard.py` turns the Mac keyboard into an interactive keyboard
+for the WHY2025 badge.
 
 Run:
 
-    ./badge_keyboard.py
+``` sh
+./badge_keyboard.py
+```
 
 or:
 
-    python3 badge_keyboard.py
+``` sh
+python3 badge_keyboard.py
+```
 
-Normal printable characters are translated to BadgeVMS/HID-style scancodes and sent to the badge. Enter, Tab, Backspace, Delete, Home, End and the arrow keys are also translated.
+Normal printable characters are translated into BadgeVMS/HID-style
+keyboard scancodes. Enter, Tab, Backspace, Delete, Home, End and the
+arrow keys are also supported.
 
-Control-key combinations are used to generate Mini Browser WHY-key shortcuts:
+The following Mac control-key combinations generate Mini Browser
+WHY-key shortcuts:
 
 | Mac key | Badge action |
 | --- | --- |
-| `Ctrl-E` | `WHY+E` — enter a new URL |
-| `Ctrl-H` | `WHY+H` — home |
-| `Ctrl-R` | `WHY+R` — reload |
-| `Ctrl-B` | `WHY+B` — back |
-| `Ctrl-G` | `WHY+G` — forward |
-| `Ctrl-F` | `WHY+F` — add/remove bookmark |
-| `Ctrl-Q` | `WHY+Q` — quit |
+| `Ctrl-E` | `WHY+E` - enter a new URL |
+| `Ctrl-H` | `WHY+H` - home |
+| `Ctrl-R` | `WHY+R` - reload |
+| `Ctrl-B` | `WHY+B` - back |
+| `Ctrl-G` | `WHY+G` - forward |
+| `Ctrl-F` | `WHY+F` - add/remove bookmark |
+| `Ctrl-Q` | `WHY+Q` - quit |
 | `Ctrl-]` | Exit `badge_keyboard.py` |
 
-The script also displays serial output from the badge, making it useful for interactive testing and debugging.
-
-The serial protocol uses lines in this form:
-
-    E <scancode-hex> <down> <text-hex>
-
-For example, an Enter key press is sent as:
-
-    E 28 1 00
-    E 28 0 00
-
-The first event is key-down and the second is key-up.
+The script also displays the badge serial/debug output while running, so
+it is useful for both interactive browsing and debugging.
 
 ### test_minibrowser_sites_and_searches.py
 
-`test_minibrowser_sites_and_searches.py` is the fixed Mini Browser regression/smoke-test suite. It is intended to be run after browser, BadgeVMS, SDL3, networking or keyboard changes to quickly verify that the known working feature set still behaves correctly.
+`test_minibrowser_sites_and_searches.py` is the fixed regression suite
+for Mini Browser.
+
+It is intended to be run after firmware, SDL3, keyboard, networking or
+Mini Browser changes to verify that the known working feature set still
+behaves correctly.
 
 Run:
 
-    ./test_minibrowser_sites_and_searches.py
+``` sh
+./test_minibrowser_sites_and_searches.py
+```
 
 or:
 
-    python3 test_minibrowser_sites_and_searches.py
+``` sh
+python3 test_minibrowser_sites_and_searches.py
+```
 
-The suite automatically drives Mini Browser through the same serial keyboard event path as a real user. It tests:
+The script drives Mini Browser entirely through the serial keyboard
+bridge. It performs browser actions in the same way a user would:
+typing action numbers, pressing Enter, entering URLs and generating
+WHY-key shortcuts.
 
-- Loading the Mini Browser home page
-- Recommended home-page links:
-  - Wiby
-  - Marginalia Search
-  - FrogFind
-  - Hacker News
-  - NPR Text
-  - TEXTFILES.COM
-  - curl
-  - ifconfig.co
-- Back history with `WHY+B`
-- Forward history with `WHY+G`
-- Reload with `WHY+R`
-- Opening an arbitrary URL with `WHY+E`
-- Editing the current URL with `WHY+C`
-- A real Wiby search for `esp32`
-- A real Google search for `esp32`
-- Returning home with `WHY+H`
+The suite checks the Mini Browser home page, the recommended websites,
+navigation/history operations, direct URL entry and real search forms.
 
-The search tests discover the numbered form field and submit controls, enter the query and submit the GET form. When result titles and destination URLs can be extracted they are printed in the summary. Google can return a more compact result representation, so the Google test also accepts a sufficiently large numbered result-action area as evidence that the search succeeded.
+The current regression tests include:
 
-Each test is isolated as much as practical and failures do not immediately stop the complete suite. At the end a summary shows every test as `PASS` or `NOT PASSED`, together with search-result details where available.
+-   Loading the Mini Browser home page.
+-   Wiby.
+-   Marginalia Search.
+-   FrogFind.
+-   Hacker News.
+-   NPR Text.
+-   TEXTFILES.COM.
+-   curl.
+-   ifconfig.co.
+-   Back history with `WHY+B`.
+-   Forward history with `WHY+G`.
+-   Reload with `WHY+R`.
+-   Opening a URL with `WHY+E`.
+-   Editing the current URL with `WHY+C`.
+-   A real Wiby search for `esp32`.
+-   A real Google search for `esp32`.
+-   Returning to the Mini Browser home page with `WHY+H`.
 
-The process exits with status `0` when every test passes and status `1` when one or more tests fail. This makes the script suitable for repeatable post-update regression testing.
+The search tests locate the numbered form field and submit button,
+enter the query, submit the GET form and inspect the resulting Mini
+Browser output.
+
+Where possible, actual search-result titles and destinations are shown
+in the test summary. Google sometimes returns a compact representation
+in which the result action numbers are visible but the title/URL text
+is not present in the serial content. In that case the test can use a
+sufficient set of numbered result actions as evidence that the search
+was successfully submitted and parsed.
+
+A complete run ends with a summary similar to:
+
+``` text
+============================================================
+MINI BROWSER TEST SUMMARY
+============================================================
+ 1. PASS       Load Mini Browser home page
+ ...
+15. PASS       Wiby search for esp32
+16. PASS       Google search for esp32
+17. PASS       Return Home with WHY+H
+------------------------------------------------------------
+Passed:     17/17
+Not passed: 0/17
+============================================================
+```
+
+A failed test is recorded as `NOT PASSED`, but the script continues
+with later tests where possible.
+
+The script exits with status `0` when all tests pass and status `1` when
+one or more tests fail. This makes it useful as a repeatable post-update
+regression test.
 
 ### test_minibrowser_configurable_test.py
 
-`test_minibrowser_configurable_test.py` uses the same serial keyboard automation but is designed for experimenting with additional websites, searches and browser commands without rewriting the test engine.
+`test_minibrowser_configurable_test.py` uses the same serial automation
+framework, but its test set is controlled by the `CONFIG` dictionary
+near the top of the script.
 
 Run:
 
-    ./test_minibrowser_configurable_test.py
+``` sh
+./test_minibrowser_configurable_test.py
+```
 
 or:
 
-    python3 test_minibrowser_configurable_test.py
+``` sh
+python3 test_minibrowser_configurable_test.py
+```
 
-Normal changes are made only in the `CONFIG` dictionary near the top of the script.
+The main configurable sections are:
 
-Serial settings are configurable:
+-   Serial device, baud rate and timeouts.
+-   Mini Browser home-page match.
+-   List of websites to test.
+-   List of searches to perform.
+-   List of WHY-key/browser commands to test.
 
-    "serial": {
-        "device": "/dev/cu.wchusbserial10",
-        "baudrate": 115200,
-        "startup_delay": 2.0,
-        "default_timeout": 25,
-    }
+The serial configuration currently looks like:
 
-Website tests can either open a URL directly with `WHY+E`:
+``` python
+"serial": {
+    "device": "/dev/cu.wchusbserial10",
+    "baudrate": 115200,
+    "startup_delay": 2.0,
+    "default_timeout": 25,
+},
+```
 
-    {
-        "name": "Example.com",
-        "mode": "url",
-        "url": "example.com",
-        "expect": r"HTTP 200.*https://example\.com",
-    }
+A website can be tested by entering its URL directly with `WHY+E`:
 
-or activate a numbered link from the Mini Browser home page:
+``` python
+{
+    "name": "Example.com",
+    "mode": "url",
+    "url": "example.com",
+    "expect": r"HTTP 200.*https://example\.com",
+},
+```
 
-    {
-        "name": "Wiby",
-        "mode": "home_link",
-        "action": 5,
-        "expect": r"HTTP 200.*https://wiby\.me",
-    }
+or by selecting a numbered link from the Mini Browser home page:
 
-Search tests describe where the form is located, the query to enter, the submit-control label and the expected HTTP result. For example:
+``` python
+{
+    "name": "Wiby",
+    "mode": "home_link",
+    "action": 5,
+    "expect": r"HTTP 200.*https://wiby\.me",
+},
+```
 
-    {
-        "name": "Wiby search",
-        "source": "home_link",
-        "home_action": 5,
-        "open_expect": r"HTTP 200.*https://wiby\.me",
-        "query": "esp32",
-        "submit_label": "[search]",
-        "result_expect": r"HTTP 200.*wiby\.me",
-        "numbered_fallback": None,
-    }
+The supplied configurable script currently contains website tests for
+Example.com, MacIP.net, Wiby, Hacker News, curl and ifconfig.co.
 
-The configurable Google test demonstrates `numbered_fallback`. This is useful when Google returns valid numbered result actions but the serial text representation does not contain enough title/URL text for the richer result parser.
+Search tests describe where the form is found, which query should be
+entered, the submit control to use and the expected result page.
 
-Badge command tests are also configured as data:
+Example Wiby configuration:
 
-    {
-        "name": "Reload",
-        "command": "R",
-        "setup": "home",
-        "expect": r"HTTP 200.*https://minibrowser\.macip\.net",
-    }
+``` python
+{
+    "name": "Wiby search",
+    "source": "home_link",
+    "home_action": 5,
+    "open_expect": r"HTTP 200.*https://wiby\.me",
+    "query": "esp32",
+    "submit_label": "[search]",
+    "result_expect": r"HTTP 200.*wiby\.me",
+    "numbered_fallback": None,
+},
+```
 
-The current built-in setup helpers are:
+The Google configuration also contains a `numbered_fallback` range. This
+allows a valid Google search to pass when Mini Browser receives many
+numbered result actions but Google does not expose enough title/URL text
+for the richer result parser.
 
-- `home`
-- `home_then_wiby`
-- `home_wiby_back`
+Badge/browser commands are also configured as data. For example:
 
-These make it possible to establish a known browser state before testing commands such as Back and Forward.
+``` python
+{
+    "name": "Reload",
+    "command": "R",
+    "setup": "home",
+    "expect": r"HTTP 200.*https://minibrowser\.macip\.net",
+},
+```
 
-`WHY+Q` is intentionally not enabled in the default command list. If a Quit test is added, keep it as the final test because it terminates Mini Browser.
+The default configurable script tests:
 
-Like the fixed regression suite, the configurable runner prints badge serial output while running, records individual failures, continues with subsequent tests where possible, and finishes with a `PASS` / `NOT PASSED` summary.
+-   `WHY+H` - Home.
+-   `WHY+R` - Reload.
+-   `WHY+B` - Back.
+-   `WHY+G` - Forward.
 
-### Which test script should I use?
+The built-in setup helpers can establish a known browser state before a
+command test. Current helpers include:
 
-Use `test_minibrowser_sites_and_searches.py` as the stable regression test after an update. Because its test set is fixed, a change from an all-PASS run is easy to spot.
+``` text
+home
+home_then_wiby
+home_wiby_back
+```
 
-Use `test_minibrowser_configurable_test.py` when testing new sites, different search queries, new search engines or additional WHY-key commands.
+`WHY+Q` is deliberately not enabled in the default command list. If a
+Quit test is added, place it last because it terminates Mini Browser.
 
-Use `badge_keyboard.py` when you want to operate Mini Browser manually from the Mac keyboard while watching the badge's serial/debug output.
+The configurable runner also finishes with a `PASS` / `NOT PASSED`
+summary and continues through independent tests when possible.
 
-## Building
+### Which test script should be used?
 
-Mini Browser is part of the WHY2025 BadgeVMS firmware tree. Build it with the existing WHY2025 ESP-IDF project configuration.
+Use `test_minibrowser_sites_and_searches.py` after normal firmware or
+Mini Browser updates. Its fixed test set makes regressions easy to
+identify.
 
-Do not casually regenerate the ESP32-P4 target configuration on early P4 badge hardware.
+Use `test_minibrowser_configurable_test.py` when experimenting with new
+sites, search engines, queries or WHY-key commands.
 
-## Project
+Use `badge_keyboard.py` when manually operating Mini Browser from the
+Mac keyboard or when debugging an individual browser interaction.
 
-Source repository:
+## Firmware storage and applications
 
-    https://github.com/mactjaap/mini_browser/
+BadgeVMS uses a storage image containing the preinstalled applications
+and their assets.
 
-Home page:
+Mini Browser's Unicode font is installed as an application asset and is
+available inside BadgeVMS as:
 
-    https://minibrowser.macip.net/
+``` text
+APPS:[mini_browser]unifont_cjk.bin
+```
 
-## Version
+BadgeVMS paths are **not UNIX paths**. They use VMS-style syntax:
 
-**Mini Browser 2.3**
+``` text
+DEVICE:[directory.subdirectory]filename.ext
+```
 
-Version 2.3 combines the stable interactive browser foundation with broad Unicode/emoji rendering, UTF-8-safe pixel-aware wrapping and genuine bold HTML text rendering.
+## Example applications
+
+The [`sdk_apps`](sdk_apps) directory contains many BadgeVMS applications
+and examples.
+
+Some useful SDK examples include:
+
+-   [`framebuffer_test`](sdk_apps/framebuffer_test) - direct interaction
+    with the windowing system and keyboard input.
+-   [`sdl_test`](sdk_apps/sdl_test) - similar functionality using SDL3.
+-   [`sdl2_test`](sdk_apps/sdl2_test) - SDL2 example.
+-   [`curl_test`](sdk_apps/curl_test) - HTTP(S) requests.
+-   [`thread_test`](sdk_apps/thread_test) - thread creation and worker
+    interaction.
+-   [`doomgeneric`](sdk_apps/doomgeneric) - a complete Doom port and a
+    useful reference for framebuffers, scaling, window handling and
+    input.
+
+The customized firmware also contains a broader selection of practical,
+system and demonstration applications for the badge.
+
+## Building BadgeVMS applications
+
+BadgeVMS provides an SDK containing the BadgeVMS headers and libraries,
+including SDL3 and SDL2.
+
+Build the SDK with:
+
+``` sh
+idf.py sdk
+```
+
+This generates the `sdk_dist` directory containing the headers and
+libraries.
+
+Applications are RISC-V position-independent ELF shared objects. You can
+use the `riscv32-esp-elf-*` toolchain supplied with ESP-IDF.
+
+Example:
+
+``` sh
+riscv32-esp-elf-gcc -O2 -fPIC -fdata-sections -ffunction-sections -flto \
+   -fno-builtin -fno-builtin-function -fno-jump-tables -fno-tree-switch-conversion \
+   -fstrict-volatile-bitfields -fvisibility=hidden -g3 -mabi=ilp32f \
+   -march=rv32imafc_zicsr_zifencei -nostartfiles -nostdlib -shared \
+   -Wl,--strip-debug -Wl,--gc-sections -e main --sysroot sdk_dist -isystem sdk_dist/include \
+   hello.c -o hello.elf
+```
+
+A suitable `riscv64-linux-gnu-gcc` can also be used; GCC is the tested
+compiler family.
+
+## Linking with SDK libraries
+
+Because of limitations in the BadgeVMS ELF loader, applications should
+not expose symbols other than `main`.
+
+The standard build flags use:
+
+``` text
+-fvisibility=hidden
+```
+
+When linking an additional static `.a` library, use:
+
+``` text
+-Wl,--exclude-libs,libmylib.a
+```
+
+All dependencies not supplied by the BadgeVMS SDK must be statically
+linked. BadgeVMS does not provide conventional shared-library loading or
+`dlopen()`.
+
+## Important BadgeVMS details
+
+-   UNIX paths do not work inside BadgeVMS.
+-   Paths use `DEVICE:[directory.subdirectory]filename.ext`.
+-   BadgeVMS applications are position-independent ELF shared objects.
+-   The RISC-V compiler and linker flags used by the SDK are important;
+    ordinary executables will not load.
+-   Dependencies outside the SDK must be statically linked.
+-   Firmware and storage-image changes should be tested on the actual
+    WHY2025 badge.
+
+## Upstream project
+
+This repository is a customized firmware build based on the original
+WHY2025 BadgeVMS project.
+
+Original WHY2025 firmware:
+
+https://gitlab.com/why2025/team-badge/firmware
+
+My customized firmware:
+
+https://github.com/mactjaap/firmware
+
+Mini Browser:
+
+https://github.com/mactjaap/mini_browser
+
+## Credits
+
+Many thanks to the WHY2025 badge team and the BadgeVMS developers for
+creating the badge firmware, operating environment, SDK and application
+ecosystem.
+
+Mini Browser and the firmware customizations in this repository are
+maintained by **MacTjaap**.
