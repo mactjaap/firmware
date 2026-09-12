@@ -21,6 +21,13 @@
 #include "esp_tca8418.h"
 #include "freertos/FreeRTOS.h"
 
+#include "hal/uart_ll.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+
 #include <sys/time.h>
 
 #define SDA_PIN           18
@@ -29,6 +36,210 @@
 #define I2C_MASTER_SCL_IO SCL_PIN
 
 #define TAG "TCA8418"
+
+#define SERIAL_KBD_LINE_MAX 64
+#define SERIAL_KBD_QUEUE_MAX 16
+
+static char serial_kbd_line[SERIAL_KBD_LINE_MAX];
+static size_t serial_kbd_line_len = 0;
+
+static event_t serial_kbd_queue[SERIAL_KBD_QUEUE_MAX];
+static unsigned serial_kbd_head = 0;
+static unsigned serial_kbd_tail = 0;
+
+static bool serial_kbd_queue_empty(void)
+{
+    return serial_kbd_head == serial_kbd_tail;
+}
+
+static bool serial_kbd_queue_push(event_t const *event)
+{
+    unsigned next = (serial_kbd_head + 1) % SERIAL_KBD_QUEUE_MAX;
+
+    if (next == serial_kbd_tail) {
+        return false;
+    }
+
+    serial_kbd_queue[serial_kbd_head] = *event;
+    serial_kbd_head = next;
+
+    return true;
+}
+
+static bool serial_kbd_queue_pop(event_t *event)
+{
+    if (serial_kbd_queue_empty()) {
+        return false;
+    }
+
+    *event = serial_kbd_queue[serial_kbd_tail];
+    serial_kbd_tail =
+        (serial_kbd_tail + 1) % SERIAL_KBD_QUEUE_MAX;
+
+    return true;
+}
+
+static void serial_kbd_make_event(
+    event_t *event,
+    keyboard_scancode_t scancode,
+    bool down,
+    key_mod_t mod,
+    unsigned char text
+)
+{
+    struct timeval tv_now;
+
+    memset(event, 0, sizeof(*event));
+
+    gettimeofday(&tv_now, NULL);
+
+    event->type = down
+        ? EVENT_KEY_DOWN
+        : EVENT_KEY_UP;
+
+    event->keyboard.timestamp =
+        (int64_t)tv_now.tv_sec * 1000000L +
+        (int64_t)tv_now.tv_usec;
+
+    event->keyboard.scancode = scancode;
+    event->keyboard.key =
+        BADGEVMS_SCANCODE_TO_KEYCODE(scancode);
+
+    event->keyboard.repeat = false;
+    event->keyboard.mod = mod;
+    event->keyboard.down = down;
+
+    /*
+     * SDL_badgevmsevents.c turns this into SDL_TEXT_INPUT
+     * on key-down.
+     */
+    event->keyboard.text =
+        down ? text : 0;
+}
+
+static void serial_kbd_process_line(char const *line)
+{
+    unsigned scancode;
+    unsigned down;
+    unsigned text;
+
+    /*
+     * Protocol:
+     *
+     * E <scancode hex> <down 0/1> <text hex>
+     *
+     * Examples:
+     *
+     * E 04 1 61    A key down, text 'a'
+     * E 04 0 00    A key up
+     * E 28 1 00    Return down
+     * E 28 0 00    Return up
+     */
+
+    if (sscanf(
+            line,
+            "E %x %u %x",
+            &scancode,
+            &down,
+            &text
+        ) != 3) {
+        return;
+    }
+
+    if (scancode > 0x1ff) {
+        return;
+    }
+
+    if (down > 1) {
+        return;
+    }
+
+    if (text > 0xff) {
+        return;
+    }
+
+    event_t event;
+
+    serial_kbd_make_event(
+        &event,
+        (keyboard_scancode_t)scancode,
+        down != 0,
+        BADGEVMS_KMOD_NONE,
+        (unsigned char)text
+    );
+
+    serial_kbd_queue_push(&event);
+
+    ESP_LOGI(
+        TAG,
+        "Serial keyboard scancode=0x%02x down=%u text=0x%02x",
+        scancode,
+        down,
+        text
+    );
+}
+
+static void serial_kbd_poll_uart(void)
+{
+    uart_dev_t *uart =
+        UART_LL_GET_HW(UART_NUM_0);
+
+    uint32_t available =
+        uart_ll_get_rxfifo_len(uart);
+
+    while (available > 0) {
+        uint8_t buffer[64];
+
+        uint32_t count = available;
+
+        if (count > sizeof(buffer)) {
+            count = sizeof(buffer);
+        }
+
+        uart_ll_read_rxfifo(
+            uart,
+            buffer,
+            count
+        );
+
+        for (uint32_t i = 0; i < count; i++) {
+            unsigned char c = buffer[i];
+
+            if (c == '\r') {
+                continue;
+            }
+
+            if (c == '\n') {
+                serial_kbd_line[
+                    serial_kbd_line_len
+                ] = '\0';
+
+                serial_kbd_process_line(
+                    serial_kbd_line
+                );
+
+                serial_kbd_line_len = 0;
+                continue;
+            }
+
+            if (serial_kbd_line_len <
+                SERIAL_KBD_LINE_MAX - 1) {
+
+                serial_kbd_line[
+                    serial_kbd_line_len++
+                ] = (char)c;
+
+            } else {
+                serial_kbd_line_len = 0;
+            }
+        }
+
+        available =
+            uart_ll_get_rxfifo_len(uart);
+    }
+}
+
+
 
 typedef struct {
     device_t       device;
@@ -201,30 +412,84 @@ static void tca8418_keyboard_task(void *pvParameters) {
     vTaskDelete(NULL);
 }
 
-static ssize_t tca8418_read(void *dev, int fd, void *buf, size_t count) {
+static ssize_t tca8418_read(void *dev, int fd, void *buf, size_t count)
+{
     tca8418_device_t *device = dev;
-    if (fd)
+
+    if (fd) {
         return -1;
+    }
+
+    /*
+     * First consume any keyboard commands arriving from the Mac.
+     */
+    serial_kbd_poll_uart();
 
     size_t written = 0;
-    while (written <= count) {
-        if (tca8418_get_event_count(device->keyboard)) {
-            char    c   = tca8418_get_key(device->keyboard);
-            uint8_t key = c & 0x7F;
-            if (key > 0x50) {
-                ESP_LOGD(TAG, "Illegal scancode 0x%02x, skipping", c);
-                continue;
-            }
-            event_t event = scancode_to_event(dev, c);
-            ESP_LOGW(TAG, "Got keyboard event raw 0x%02x scancode 0x%02x", c, event.keyboard.scancode);
-            if (written + sizeof(event_t) > count) {
-                break;
-            }
-            memcpy(buf, &event, sizeof(event_t));
-            written += sizeof(event_t);
-        } else {
+
+    /*
+     * Synthetic serial keyboard events have priority.
+     */
+    while (written + sizeof(event_t) <= count) {
+        event_t event;
+
+        if (!serial_kbd_queue_pop(&event)) {
             break;
         }
+
+        memcpy(
+            (uint8_t *)buf + written,
+            &event,
+            sizeof(event)
+        );
+
+        written += sizeof(event);
+    }
+
+    /*
+     * Then continue processing the real TCA8418 exactly as before.
+     */
+    while (written + sizeof(event_t) <= count) {
+        if (!tca8418_get_event_count(device->keyboard)) {
+            break;
+        }
+
+        char c = tca8418_get_key(
+            device->keyboard
+        );
+
+        uint8_t key = c & 0x7F;
+
+        if (key > 0x50) {
+            ESP_LOGD(
+                TAG,
+                "Illegal scancode 0x%02x, skipping",
+                c
+            );
+
+            continue;
+        }
+
+        event_t event =
+            scancode_to_event(
+                device,
+                c
+            );
+
+        ESP_LOGW(
+            TAG,
+            "Got keyboard event raw 0x%02x scancode 0x%02x",
+            c,
+            event.keyboard.scancode
+        );
+
+        memcpy(
+            (uint8_t *)buf + written,
+            &event,
+            sizeof(event)
+        );
+
+        written += sizeof(event);
     }
 
     return written;
