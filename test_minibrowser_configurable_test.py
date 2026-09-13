@@ -39,7 +39,7 @@ CONFIG = {
         "device": "/dev/cu.wchusbserial10",
         "baudrate": 115200,
         "startup_delay": 2.0,
-        "default_timeout": 25,
+        "default_timeout": 1000,
     },
 
     # Mini Browser home page.
@@ -59,6 +59,30 @@ CONFIG = {
             "mode": "url",
             "url": "example.com",
             "expect": r"HTTP 200.*https://example\.com",
+        },
+       {
+            "name": "UTF-8",
+            "mode": "url",
+            "url": "minibrowser.macip.net/u.html",
+            "expect": r"HTTP 200.*https://minibrowser.macip\.net",
+        },
+       {
+            "name": "UTF-8",
+            "mode": "url",
+            "url": "minibrowser.macip.net/e.html",
+            "expect": r"HTTP 200.*https://minibrowser.macip\.net",
+        },
+       {
+            "name": "UTF-8",
+            "mode": "url",
+            "url": "minibrowser.macip.net/em.html",
+            "expect": r"HTTP 200.*https://minibrowser.macip\.net",
+        },
+       {
+            "name": "404",
+            "mode": "url",
+            "url": "minibrowser.macip.net/nopage.html",
+            "expect": r"HTTP 404.*https://minibrowser.macip\.net",
         },
         {
             "name": "MacIP.net",
@@ -105,30 +129,56 @@ CONFIG = {
     #   useful for Google when result titles/URLs are stripped but numbered
     #   result actions are still clearly present.
     #
+
     "searches": [
-        {
-            "name": "Wiby search",
-            "source": "home_link",
-            "home_action": 5,
-            "open_expect": r"HTTP 200.*https://wiby\.me",
-            "query": "esp32",
-            "submit_label": "[search]",
-            "result_expect": r"HTTP 200.*wiby\.me",
-            "numbered_fallback": None,
-        },
-        {
-            "name": "Google search",
-            "source": "home",
-            "query": "esp32",
-            "submit_label": "[google search]",
-            "result_expect": r"HTTP 200.*google",
-            "numbered_fallback": {
-                "start": 18,
-                "stop": 46,
-                "minimum": 3,
+            {
+                "name": "Wiby search",
+                "source": "home_link",
+                "home_action": 5,
+                "open_expect": r"HTTP 200.*https://wiby\.me",
+                "query": "esp32",
+                "submit_label": "[search]",
+                "result_expect": r"HTTP 200.*wiby\.me",
+                "numbered_fallback": None,
             },
-        },
-    ],
+            {
+                "name": "Google search",
+                "source": "home",
+                "query": "esp32",
+                "submit_label": "[google search]",
+                "result_expect": r"HTTP 200.*google",
+                "numbered_fallback": {
+                    "start": 18,
+                    "stop": 46,
+                    "minimum": 3,
+                },
+            },
+            {
+                "name": "Google search Mini Browser",
+                "source": "home",
+                "query": "why2025 mini_browser",
+                "submit_label": "[google search]",
+                "result_expect": r"HTTP 200.*google",
+                "numbered_fallback": {
+                    "start": 18,
+                    "stop": 46,
+                    "minimum": 3,
+                }
+            },
+	    {	
+                "name": "Google search MacIPRpi",
+                "source": "home",
+                "query": "MacIPRpi",
+                "submit_label": "[google search]",
+                "result_expect": r"HTTP 200.*google",
+                "numbered_fallback": {
+                    "start": 18,
+                    "stop": 46,
+                    "minimum": 3,
+                }
+            },
+        ],
+
 
     # Badge/browser command tests.
     #
