@@ -20,6 +20,8 @@ DEFAULT_TIMEOUT = 20.0
 SCREENSHOTS_ENABLED = True
 SCREENSHOT_DIRECTORY = Path("screenshots")
 SCREENSHOT_TIMEOUT = 150.0
+# True = WHY+Z complete page; False = WHY+S visible viewport only.
+SCREENSHOT_FULL_PAGE = True
 SCREENSHOT_ON_PASS = True
 SCREENSHOT_ON_FAILURE = True
 
@@ -216,8 +218,11 @@ class Badge:
                         # IMG records. Keep enough history for the complete
                         # transfer so early data/parity groups are not discarded
                         # before IMG END arrives.
-                        if len(self.lines) > 20000:
-                            self.lines = self.lines[-18000:]
+                        # Full-page screenshots can produce tens of thousands
+                        # of IMG records. Keep a large host-side history so
+                        # the beginning of a long transfer is not discarded.
+                        if len(self.lines) > 250000:
+                            self.lines = self.lines[-225000:]
 
                     if stripped.startswith("IMG END "):
                         suppress_img = False
@@ -333,7 +338,13 @@ class Badge:
         time.sleep(seconds)
 
 
-    def capture_screenshot(self, output_path, timeout=SCREENSHOT_TIMEOUT, retries=2):
+    def capture_screenshot(
+        self,
+        output_path,
+        timeout=SCREENSHOT_TIMEOUT,
+        retries=2,
+        full_page=SCREENSHOT_FULL_PAGE,
+    ):
         last_error = None
 
         for attempt in range(1, retries + 2):
@@ -350,7 +361,8 @@ class Badge:
 
                 return self._capture_screenshot_once(
                     output_path,
-                    timeout
+                    timeout,
+                    full_page,
                 )
 
             except (
@@ -373,19 +385,27 @@ class Badge:
         )
 
 
-    def _capture_screenshot_once(self, output_path, timeout=SCREENSHOT_TIMEOUT):
+    def _capture_screenshot_once(
+        self,
+        output_path,
+        timeout=SCREENSHOT_TIMEOUT,
+        full_page=SCREENSHOT_FULL_PAGE,
+    ):
         output_path = Path(output_path)
 
         self.clear_log()
 
+        mode = "full page (WHY+Z)" if full_page else "viewport (WHY+S)"
         print(
-            f"\n[SCREENSHOT] Requesting {output_path}",
+            f"\n[SCREENSHOT] Requesting {output_path} [{mode}]",
             file=sys.stderr
         )
 
-        self.why("S")
+        self.why("Z" if full_page else "S")
 
+        # Treat timeout as inactivity once data starts arriving.
         deadline = time.monotonic() + timeout
+        last_line_count = 0
         begin_index = None
         begin_match = None
         end_index = None
@@ -401,6 +421,10 @@ class Badge:
 
         while time.monotonic() < deadline:
             lines = self.get_lines()
+
+            if len(lines) != last_line_count:
+                last_line_count = len(lines)
+                deadline = time.monotonic() + timeout
 
             for index, line in enumerate(lines):
                 stripped = line.strip()
@@ -876,7 +900,8 @@ def run_test(results, number, description, test_func):
 
         try:
             shot = SCREENSHOT_BADGE.capture_screenshot(
-                output_path
+                output_path,
+                full_page=SCREENSHOT_FULL_PAGE,
             )
 
             details.append(

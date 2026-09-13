@@ -20,16 +20,12 @@ Example:
     E 28 0 00
 """
 
-import base64
 import re
-import struct
 import sys
 import time
 import tty
 import termios
 import threading
-import zlib
-from pathlib import Path
 
 import serial
 
@@ -43,19 +39,7 @@ CONFIG = {
         "device": "/dev/cu.wchusbserial10",
         "baudrate": 115200,
         "startup_delay": 2.0,
-        "default_timeout": 25,
-    },
-
-    "screenshots": {
-        "enabled": True,
-        "directory": "screenshots",
-        "full_page": True,
-        "timeout": 150,
-        "after_home": True,
-        "after_sites": True,
-        "after_searches": True,
-        "after_commands": False,
-        "screenshot_on_failure": True,
+        "default_timeout": 1000,
     },
 
     # Mini Browser home page.
@@ -75,6 +59,30 @@ CONFIG = {
             "mode": "url",
             "url": "example.com",
             "expect": r"HTTP 200.*https://example\.com",
+        },
+       {
+            "name": "UTF-8",
+            "mode": "url",
+            "url": "minibrowser.macip.net/u.html",
+            "expect": r"HTTP 200.*https://minibrowser.macip\.net",
+        },
+       {
+            "name": "UTF-8",
+            "mode": "url",
+            "url": "minibrowser.macip.net/e.html",
+            "expect": r"HTTP 200.*https://minibrowser.macip\.net",
+        },
+       {
+            "name": "UTF-8",
+            "mode": "url",
+            "url": "minibrowser.macip.net/em.html",
+            "expect": r"HTTP 200.*https://minibrowser.macip\.net",
+        },
+       {
+            "name": "404",
+            "mode": "url",
+            "url": "minibrowser.macip.net/nopage.html",
+            "expect": r"HTTP 404.*https://minibrowser.macip\.net",
         },
         {
             "name": "MacIP.net",
@@ -121,30 +129,56 @@ CONFIG = {
     #   useful for Google when result titles/URLs are stripped but numbered
     #   result actions are still clearly present.
     #
+
     "searches": [
-        {
-            "name": "Wiby search",
-            "source": "home_link",
-            "home_action": 5,
-            "open_expect": r"HTTP 200.*https://wiby\.me",
-            "query": "esp32",
-            "submit_label": "[search]",
-            "result_expect": r"HTTP 200.*wiby\.me",
-            "numbered_fallback": None,
-        },
-        {
-            "name": "Google search",
-            "source": "home",
-            "query": "esp32",
-            "submit_label": "[google search]",
-            "result_expect": r"HTTP 200.*google",
-            "numbered_fallback": {
-                "start": 18,
-                "stop": 46,
-                "minimum": 3,
+            {
+                "name": "Wiby search",
+                "source": "home_link",
+                "home_action": 5,
+                "open_expect": r"HTTP 200.*https://wiby\.me",
+                "query": "esp32",
+                "submit_label": "[search]",
+                "result_expect": r"HTTP 200.*wiby\.me",
+                "numbered_fallback": None,
             },
-        },
-    ],
+            {
+                "name": "Google search",
+                "source": "home",
+                "query": "esp32",
+                "submit_label": "[google search]",
+                "result_expect": r"HTTP 200.*google",
+                "numbered_fallback": {
+                    "start": 18,
+                    "stop": 46,
+                    "minimum": 3,
+                },
+            },
+            {
+                "name": "Google search Mini Browser",
+                "source": "home",
+                "query": "why2025 mini_browser",
+                "submit_label": "[google search]",
+                "result_expect": r"HTTP 200.*google",
+                "numbered_fallback": {
+                    "start": 18,
+                    "stop": 46,
+                    "minimum": 3,
+                }
+            },
+	    {	
+                "name": "Google search MacIPRpi",
+                "source": "home",
+                "query": "MacIPRpi",
+                "submit_label": "[google search]",
+                "result_expect": r"HTTP 200.*google",
+                "numbered_fallback": {
+                    "start": 18,
+                    "stop": 46,
+                    "minimum": 3,
+                }
+            },
+        ],
+
 
     # Badge/browser command tests.
     #
@@ -223,137 +257,6 @@ DEFAULT_TIMEOUT = CONFIG["serial"]["default_timeout"]
 # SERIAL / KEYBOARD
 # ---------------------------------------------------------------------------
 
-def safe_filename(text):
-    value = re.sub(
-        r"[^A-Za-z0-9._-]+",
-        "-",
-        text.strip().lower(),
-    )
-    value = value.strip("-._")
-    return value or "screenshot"
-
-
-def png_chunk(chunk_type, payload):
-    crc = zlib.crc32(chunk_type)
-    crc = zlib.crc32(payload, crc) & 0xFFFFFFFF
-
-    return (
-        struct.pack(">I", len(payload))
-        + chunk_type
-        + payload
-        + struct.pack(">I", crc)
-    )
-
-
-def write_png_rgb(path, width, height, rgb):
-    expected = width * height * 3
-
-    if len(rgb) != expected:
-        raise ValueError(
-            f"RGB byte count mismatch: got {len(rgb)}, expected {expected}"
-        )
-
-    rows = bytearray()
-    stride = width * 3
-
-    for y in range(height):
-        rows.append(0)
-        start = y * stride
-        rows.extend(
-            rgb[start:start + stride]
-        )
-
-    png = bytearray(b"\x89PNG\r\n\x1a\n")
-
-    png.extend(
-        png_chunk(
-            b"IHDR",
-            struct.pack(
-                ">IIBBBBB",
-                width,
-                height,
-                8,
-                2,
-                0,
-                0,
-                0,
-            ),
-        )
-    )
-
-    png.extend(
-        png_chunk(
-            b"IDAT",
-            zlib.compress(
-                bytes(rows),
-                9,
-            ),
-        )
-    )
-
-    png.extend(
-        png_chunk(
-            b"IEND",
-            b"",
-        )
-    )
-
-    path = Path(path)
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-    path.write_bytes(png)
-
-
-def decode_rle5(data, width, height):
-    if len(data) % 5 != 0:
-        raise ValueError(
-            f"RLE stream length {len(data)} is not divisible by 5"
-        )
-
-    expected_pixels = width * height
-    produced_pixels = 0
-    rgb = bytearray()
-
-    for offset in range(0, len(data), 5):
-        count = (
-            data[offset]
-            | (data[offset + 1] << 8)
-        )
-
-        if count == 0:
-            raise ValueError(
-                f"Invalid zero-length RLE run at byte {offset}"
-            )
-
-        r = data[offset + 2]
-        g = data[offset + 3]
-        b = data[offset + 4]
-
-        produced_pixels += count
-
-        if produced_pixels > expected_pixels:
-            raise ValueError(
-                "RLE stream expands beyond screenshot dimensions"
-            )
-
-        rgb.extend(
-            bytes((r, g, b)) * count
-        )
-
-    if produced_pixels != expected_pixels:
-        raise ValueError(
-            (
-                f"RLE pixel count mismatch: got {produced_pixels}, "
-                f"expected {expected_pixels}"
-            )
-        )
-
-    return bytes(rgb)
-
-
-
 class Badge:
     def __init__(self):
         self.serial = serial.Serial(
@@ -374,7 +277,6 @@ class Badge:
 
     def _reader(self):
         buffer = bytearray()
-        suppress_img = False
 
         while self.running:
             try:
@@ -383,59 +285,30 @@ class Badge:
                 if not data:
                     continue
 
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+
                 buffer.extend(data)
 
                 while b"\n" in buffer:
                     line, _, buffer = buffer.partition(b"\n")
-
                     text = line.decode(
                         "utf-8",
-                        errors="replace"
+                        errors="replace",
                     ).rstrip("\r")
-
-                    stripped = text.strip()
-
-                    if stripped.startswith("IMG BEGIN "):
-                        suppress_img = True
-                        print(
-                            "[SCREENSHOT] Receiving image data...",
-                            file=sys.stderr
-                        )
-
-                    is_img_line = (
-                        stripped.startswith("IMG ")
-                        or suppress_img
-                    )
-
-                    if not is_img_line:
-                        print(text)
 
                     with self.lock:
                         self.lines.append(text)
 
-                        # FEC screenshots can produce well over 5,000
-                        # IMG records. Keep enough history for the complete
-                        # transfer so early data/parity groups are not discarded
-                        # before IMG END arrives.
-                        # Full-page screenshots can produce tens of thousands
-                        # of IMG records. Keep a large host-side history so
-                        # the beginning of a long transfer is not discarded.
-                        if len(self.lines) > 250000:
-                            self.lines = self.lines[-225000:]
-
-                    if stripped.startswith("IMG END "):
-                        suppress_img = False
-
-                    elif stripped.startswith("IMG ERROR "):
-                        suppress_img = False
+                        if len(self.lines) > 5000:
+                            self.lines = self.lines[-3500:]
 
             except Exception as exc:
                 if self.running:
                     print(
                         f"\nSerial reader error: {exc}",
-                        file=sys.stderr
+                        file=sys.stderr,
                     )
-
                 return
 
     def close(self):
@@ -496,357 +369,6 @@ class Badge:
     def settle(self, seconds=0.5):
         self.serial.flush()
         time.sleep(seconds)
-
-
-    def capture_screenshot(
-        self,
-        output_path,
-        timeout=None,
-        retries=2,
-        full_page=None,
-    ):
-        if timeout is None:
-            timeout = CONFIG["screenshots"]["timeout"]
-        if full_page is None:
-            full_page = CONFIG["screenshots"].get("full_page", True)
-
-        last_error = None
-
-        for attempt in range(1, retries + 2):
-            try:
-                if attempt > 1:
-                    print(
-                        (
-                            f"[SCREENSHOT] Retrying transfer "
-                            f"(attempt {attempt}/{retries + 1})..."
-                        ),
-                        file=sys.stderr
-                    )
-                    time.sleep(0.5)
-
-                return self._capture_screenshot_once(
-                    output_path,
-                    timeout,
-                    full_page,
-                )
-
-            except (
-                ValueError,
-                TimeoutError,
-                RuntimeError,
-            ) as exc:
-                last_error = exc
-
-                print(
-                    f"[SCREENSHOT] Transfer error: {exc}",
-                    file=sys.stderr
-                )
-
-        raise RuntimeError(
-            (
-                f"Screenshot transfer failed after "
-                f"{retries + 1} attempts: {last_error}"
-            )
-        )
-
-
-    def _capture_screenshot_once(
-        self,
-        output_path,
-        timeout=None,
-        full_page=True,
-    ):
-        if timeout is None:
-            timeout = CONFIG["screenshots"]["timeout"]
-
-        output_path = Path(output_path)
-        self.clear_log()
-
-        mode = "full page (WHY+Z)" if full_page else "viewport (WHY+S)"
-        print(
-            f"\n[SCREENSHOT] Requesting {output_path} [{mode}]",
-            file=sys.stderr
-        )
-
-        self.why("Z" if full_page else "S")
-
-        # Treat timeout as inactivity once data starts arriving.
-        deadline = time.monotonic() + timeout
-        last_line_count = 0
-        begin_index = None
-        begin_match = None
-        end_index = None
-        end_match = None
-        error_line = None
-
-        begin_re = re.compile(
-            r"IMG BEGIN (\d+) (\d+) RGB24 RLE5FEC1 (\d+) (\d+)"
-        )
-        end_re = re.compile(
-            r"IMG END (\d+) ([0-9A-Fa-f]{8}) (\d+)"
-        )
-
-        while time.monotonic() < deadline:
-            lines = self.get_lines()
-
-            if len(lines) != last_line_count:
-                last_line_count = len(lines)
-                deadline = time.monotonic() + timeout
-
-            for index, line in enumerate(lines):
-                stripped = line.strip()
-
-                if begin_index is None:
-                    match = begin_re.fullmatch(stripped)
-                    if match:
-                        begin_index = index
-                        begin_match = match
-                        continue
-
-                if stripped.startswith("IMG ERROR "):
-                    error_line = stripped
-                    break
-
-                if begin_index is not None:
-                    match = end_re.fullmatch(stripped)
-                    if match:
-                        end_index = index
-                        end_match = match
-                        break
-
-            if error_line:
-                raise RuntimeError(
-                    f"Badge screenshot failed: {error_line}"
-                )
-
-            if (
-                begin_index is not None
-                and end_index is not None
-                and begin_match is not None
-                and end_match is not None
-            ):
-                break
-
-            time.sleep(0.05)
-
-        if (
-            begin_index is None
-            or end_index is None
-            or begin_match is None
-            or end_match is None
-        ):
-            raise TimeoutError(
-                "Timed out waiting for complete IMG screenshot transfer"
-            )
-
-        width = int(begin_match.group(1))
-        height = int(begin_match.group(2))
-        chunk_size = int(begin_match.group(3))
-        group_size = int(begin_match.group(4))
-        declared_size = int(end_match.group(1))
-        declared_crc = int(end_match.group(2), 16)
-        declared_chunks = int(end_match.group(3))
-
-        if chunk_size <= 0 or group_size <= 0:
-            raise ValueError(
-                "Invalid screenshot FEC parameters from badge"
-            )
-
-        data_chunks = {}
-        parity_chunks = {}
-        damaged_records = 0
-
-        data_re = re.compile(
-            r"IMG D (\d{6}) (\d{2}) ([0-9A-Fa-f]{8}) ([A-Za-z0-9+/=]+)"
-        )
-        parity_re = re.compile(
-            r"IMG P (\d{6}) ([0-9A-Fa-f]{8}) ([A-Za-z0-9+/=]+)"
-        )
-
-        for line in lines[begin_index + 1:end_index]:
-            stripped = line.strip()
-            match = data_re.fullmatch(stripped)
-
-            if match:
-                sequence = int(match.group(1))
-                declared_length = int(match.group(2))
-                expected_crc = int(match.group(3), 16)
-
-                if sequence >= declared_chunks:
-                    continue
-
-                try:
-                    chunk = base64.b64decode(
-                        match.group(4),
-                        validate=True
-                    )
-                except Exception:
-                    damaged_records += 1
-                    continue
-
-                if len(chunk) != declared_length:
-                    damaged_records += 1
-                    continue
-
-                if declared_length <= 0 or declared_length > chunk_size:
-                    damaged_records += 1
-                    continue
-
-                actual_crc = zlib.crc32(chunk) & 0xFFFFFFFF
-                if actual_crc != expected_crc:
-                    damaged_records += 1
-                    continue
-
-                data_chunks.setdefault(sequence, chunk)
-                continue
-
-            match = parity_re.fullmatch(stripped)
-            if match:
-                group = int(match.group(1))
-                expected_crc = int(match.group(2), 16)
-
-                try:
-                    parity = base64.b64decode(
-                        match.group(3),
-                        validate=True
-                    )
-                except Exception:
-                    damaged_records += 1
-                    continue
-
-                if len(parity) != chunk_size:
-                    damaged_records += 1
-                    continue
-
-                actual_crc = zlib.crc32(parity) & 0xFFFFFFFF
-                if actual_crc != expected_crc:
-                    damaged_records += 1
-                    continue
-
-                parity_chunks.setdefault(group, parity)
-
-        repaired_chunks = 0
-        total_groups = (
-            declared_chunks + group_size - 1
-        ) // group_size
-
-        for group in range(total_groups):
-            first_sequence = group * group_size
-            last_sequence = min(
-                first_sequence + group_size,
-                declared_chunks
-            )
-            group_sequences = list(
-                range(first_sequence, last_sequence)
-            )
-            missing = [
-                sequence
-                for sequence in group_sequences
-                if sequence not in data_chunks
-            ]
-
-            if not missing:
-                continue
-
-            if len(missing) != 1 or group not in parity_chunks:
-                raise ValueError(
-                    (
-                        f"Screenshot FEC could not repair group {group}: "
-                        f"missing chunks {missing}, "
-                        f"parity={'yes' if group in parity_chunks else 'no'}"
-                    )
-                )
-
-            missing_sequence = missing[0]
-            recovered = bytearray(parity_chunks[group])
-
-            for sequence in group_sequences:
-                if sequence == missing_sequence:
-                    continue
-
-                chunk = data_chunks[sequence]
-                for index, value in enumerate(chunk):
-                    recovered[index] ^= value
-
-            if missing_sequence == declared_chunks - 1:
-                missing_length = (
-                    declared_size
-                    - chunk_size * (declared_chunks - 1)
-                )
-            else:
-                missing_length = chunk_size
-
-            if missing_length <= 0 or missing_length > chunk_size:
-                raise ValueError(
-                    (
-                        "Screenshot FEC calculated invalid recovered "
-                        f"chunk length {missing_length} for sequence "
-                        f"{missing_sequence}"
-                    )
-                )
-
-            data_chunks[missing_sequence] = bytes(
-                recovered[:missing_length]
-            )
-            repaired_chunks += 1
-
-        still_missing = [
-            sequence
-            for sequence in range(declared_chunks)
-            if sequence not in data_chunks
-        ]
-
-        if still_missing:
-            raise ValueError(
-                f"Screenshot still has missing chunks: {still_missing[:12]}"
-            )
-
-        compressed = b"".join(
-            data_chunks[sequence]
-            for sequence in range(declared_chunks)
-        )
-
-        if len(compressed) != declared_size:
-            raise ValueError(
-                (
-                    f"Screenshot compressed-size mismatch: got "
-                    f"{len(compressed)}, expected {declared_size}"
-                )
-            )
-
-        actual_crc = zlib.crc32(compressed) & 0xFFFFFFFF
-        if actual_crc != declared_crc:
-            raise ValueError(
-                (
-                    f"Screenshot CRC32 mismatch after FEC: got "
-                    f"{actual_crc:08X}, expected {declared_crc:08X}"
-                )
-            )
-
-        rgb = decode_rle5(compressed, width, height)
-        write_png_rgb(output_path, width, height, rgb)
-
-        print(
-            (
-                f"[SCREENSHOT] Saved {output_path} "
-                f"({width}x{height}, "
-                f"{len(compressed)} RLE bytes, "
-                f"CRC32 {actual_crc:08X}, "
-                f"FEC repaired {repaired_chunks} chunk(s), "
-                f"discarded {damaged_records} damaged record(s))"
-            ),
-            file=sys.stderr
-        )
-
-        return {
-            "path": str(output_path),
-            "width": width,
-            "height": height,
-            "compressed_bytes": len(compressed),
-            "crc32": f"{actual_crc:08X}",
-            "fec_repaired_chunks": repaired_chunks,
-            "damaged_records": damaged_records,
-        }
 
     def enter(self):
         self.press(0x28)
@@ -1499,106 +1021,53 @@ def run_test(
     number,
     description,
     test_func,
-    badge=None,
-    screenshot=False,
 ):
     print(
         f"\n\n========== TEST {number}: {description} ==========",
         file=sys.stderr,
     )
 
-    details = []
-    passed = False
-    error = ""
-
     try:
-        returned = test_func()
+        details = test_func()
 
-        if returned is None:
-            returned = []
+        if details is None:
+            details = []
 
-        elif isinstance(returned, str):
-            returned = [returned]
+        elif isinstance(details, str):
+            details = [details]
 
-        details.extend(
-            list(returned)
-        )
-        passed = True
-
-    except Exception as exc:
-        error = str(exc)
-
-    screenshot_config = CONFIG["screenshots"]
-
-    screenshot_wanted = (
-        screenshot_config["enabled"]
-        and badge is not None
-        and (
-            (passed and screenshot)
-            or (
-                not passed
-                and screenshot_config[
-                    "screenshot_on_failure"
-                ]
-            )
-        )
-    )
-
-    if screenshot_wanted:
-        prefix = "" if passed else "FAILED-"
-
-        output_path = (
-            Path(
-                screenshot_config["directory"]
-            )
-            / (
-                f"{prefix}{number:02d}-"
-                f"{safe_filename(description)}.png"
-            )
+        results.append(
+            {
+                "number": number,
+                "description": description,
+                "passed": True,
+                "error": "",
+                "details": list(details),
+            }
         )
 
-        try:
-            shot = badge.capture_screenshot(
-                output_path,
-                screenshot_config["timeout"],
-                full_page=screenshot_config.get("full_page", True),
-            )
-
-            details.append(
-                (
-                    f"Screenshot: {shot['path']} "
-                    f"({shot['width']}x{shot['height']}, "
-                    f"CRC32 {shot['crc32']})"
-                )
-            )
-
-        except Exception as shot_exc:
-            details.append(
-                f"Screenshot FAILED: {shot_exc}"
-            )
-
-    results.append(
-        {
-            "number": number,
-            "description": description,
-            "passed": passed,
-            "error": error,
-            "details": details,
-        }
-    )
-
-    if passed:
         print(
             f"\nPASS: {description}",
             file=sys.stderr,
         )
-    else:
+
+    except Exception as exc:
+        results.append(
+            {
+                "number": number,
+                "description": description,
+                "passed": False,
+                "error": str(exc),
+                "details": [],
+            }
+        )
+
         print(
             f"\nNOT PASSED: {description}",
             file=sys.stderr,
         )
         print(
-            f"Reason: {error}",
+            f"Reason: {exc}",
             file=sys.stderr,
         )
 
@@ -1700,8 +1169,6 @@ def main():
             number,
             "Load Mini Browser home page",
             lambda: go_home(badge),
-            badge=badge,
-            screenshot=CONFIG["screenshots"]["after_home"],
         )
         number += 1
 
@@ -1739,8 +1206,6 @@ def main():
                 number,
                 f"Website: {site['name']}",
                 site_test,
-                badge=badge,
-                screenshot=CONFIG["screenshots"]["after_sites"],
             )
             number += 1
 
@@ -1754,8 +1219,6 @@ def main():
                     badge,
                     search_config,
                 ),
-                badge=badge,
-                screenshot=CONFIG["screenshots"]["after_searches"],
             )
             number += 1
 
@@ -1796,8 +1259,6 @@ def main():
                     f"{command_config['name']}"
                 ),
                 command_test,
-                badge=badge,
-                screenshot=CONFIG["screenshots"]["after_commands"],
             )
             number += 1
 

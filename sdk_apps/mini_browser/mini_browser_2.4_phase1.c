@@ -129,11 +129,6 @@ static const unsigned char font5x7[96][5] = {
 #define CH_W ((FONT_W_COLS + FONT_COL_GAP) * FONT_SCALE)
 #define CH_H ((FONT_H_ROWS) * FONT_SCALE)
 
-/* External Unicode glyph geometry. Needed by wrapping and rendering. */
-#define UNICODE_GLYPH_BYTES 32
-#define UNICODE_GLYPH_W 16
-#define UNICODE_GLYPH_H 16
-
 /* --------- curl memory sink --------- */
 typedef struct { char *buf; size_t len; } mem_t;
 static size_t wr_cb(void *ptr, size_t sz, size_t nm, void *ud) {
@@ -994,62 +989,34 @@ static unsigned utf8_next(const char *s, size_t len, size_t *i);
 /* ---------- wrap text to columns ---------- */
 
 
-static int wrap_glyph_width(unsigned cp) {
-    if (cp == TEXT_BOLD_ON || cp == TEXT_BOLD_OFF)
-        return 0;
-
-    if (cp >= 32 && cp <= 126)
-        return CH_W;
-
-    if (cp >= 0x80 && cp <= 0x10FFFF)
-        return UNICODE_GLYPH_W + 1;
-
-    return 0;
-}
-
-static int wrap_token_width(const char *s, size_t start, size_t end) {
-    int width = 0;
-    size_t i = start;
-
-    while (i < end) {
-        unsigned cp = utf8_next(s, end, &i);
-        if (cp == 0)
-            break;
-        width += wrap_glyph_width(cp);
-    }
-
-    return width;
-}
-
 static char *wrap_text(const char *in, int max_cols) {
     if (!in) return NULL;
 
     size_t n = strlen(in);
 
     /*
-     * Word-aware wrapping can replace a space with a newline and can also
-     * add newlines inside an overlong token. 2*n + 8 remains a generous
-     * upper bound while keeping the allocation small on the badge.
+     * Worst case we add roughly one newline per input codepoint.
+     * 2*n + 8 is therefore safely large enough.
      */
     char *out = (char*)malloc(n * 2 + 8);
     if (!out) return NULL;
 
     /*
-     * Keep the existing caller interface, but make every decision in pixels
-     * using exactly the same advances as draw_text().
+     * max_cols is still supplied by the existing caller. Convert it
+     * back to the exact content width in pixels. This keeps the public
+     * interface unchanged while making wrapping match draw_text().
      */
     const int max_px = max_cols > 0 ? max_cols * CH_W : 0;
-    const int space_w = CH_W;
 
     size_t i = 0;
     size_t o = 0;
     int line_px = 0;
     int blank_run = 0;
-    bool pending_space = false;
 
     while (i < n) {
-        size_t cp_start = i;
+        size_t start = i;
         unsigned cp = utf8_next(in, n, &i);
+        size_t bytes = i - start;
 
         if (cp == 0)
             break;
@@ -1057,16 +1024,13 @@ static char *wrap_text(const char *in, int max_cols) {
         if (cp == '\r')
             continue;
 
-        /* Treat NBSP as the same break opportunity as an ordinary space. */
-        if (cp == ' ' || cp == 0xA0) {
-            if (line_px > 0)
-                pending_space = true;
+        /* Preserve formatting markers without giving them any width. */
+        if (cp == TEXT_BOLD_ON || cp == TEXT_BOLD_OFF) {
+            out[o++] = (char)cp;
             continue;
         }
 
         if (cp == '\n') {
-            pending_space = false;
-
             if (line_px == 0) {
                 if (blank_run)
                     continue;
@@ -1081,74 +1045,57 @@ static char *wrap_text(const char *in, int max_cols) {
         }
 
         /*
-         * Find one complete word/token. Formatting markers are part of the
-         * token but have zero width. Space, NBSP, CR and LF end the token.
+         * Normalize NBSP to an ordinary space.
          */
-        size_t token_start = cp_start;
-        size_t token_end = i;
-        size_t scan = i;
-
-        while (scan < n) {
-            size_t next_start = scan;
-            unsigned next_cp = utf8_next(in, n, &scan);
-
-            if (next_cp == 0 || next_cp == ' ' || next_cp == 0xA0 ||
-                next_cp == '\r' || next_cp == '\n') {
-                scan = next_start;
-                break;
-            }
-
-            token_end = scan;
-        }
-
-        int token_px = wrap_token_width(in, token_start, token_end);
+        if (cp == 0xA0)
+            cp = ' ';
 
         /*
-         * Prefer moving the whole word to the next line. This is the key
-         * Phase 1.5 behavior: "bookmarks" stays intact instead of becoming
-         * "bookmar" / "ks" merely because the remaining pixels are short.
+         * Collapse redundant ASCII spaces as before.
          */
-        if (pending_space && line_px > 0) {
-            if (max_px > 0 && line_px + space_w + token_px > max_px) {
-                out[o++] = '\n';
-                line_px = 0;
-            } else {
-                out[o++] = ' ';
-                line_px += space_w;
-            }
-        }
-        pending_space = false;
+        if (cp == ' ' && (line_px == 0 || (o > 0 && out[o - 1] == ' ')))
+            continue;
 
         /*
-         * Emit the token UTF-8 codepoint by codepoint. Normally the whole
-         * token fits because of the decision above. If a single token is
-         * wider than the line (long URL, CJK without spaces, etc.), fall
-         * back to UTF-8-safe glyph wrapping rather than overflowing.
+         * IMPORTANT: use exactly the same advance widths as draw_text().
+         *
+         * ASCII:   CH_W = 12 pixels
+         * Unicode: 16-pixel glyph + 1-pixel gap = 17 pixels
          */
-        size_t t = token_start;
-        while (t < token_end) {
-            size_t glyph_start = t;
-            unsigned glyph = utf8_next(in, token_end, &t);
-            size_t glyph_bytes = t - glyph_start;
+        int char_w;
+        if (cp >= 32 && cp <= 126)
+            char_w = CH_W;
+        else
+            char_w = 16 + 1;  /* UNICODE_GLYPH_W + 1 */
 
-            if (glyph == 0)
-                break;
+        /*
+         * Wrap BEFORE copying the complete UTF-8 sequence. This prevents
+         * draw_text() from performing an extra hidden wrap and painting
+         * over the following browser line.
+         */
+        if (max_px > 0 && line_px > 0 && line_px + char_w > max_px) {
+            out[o++] = '\n';
+            line_px = 0;
 
-            int glyph_w = wrap_glyph_width(glyph);
-
-            if (max_px > 0 && glyph_w > 0 && line_px > 0 &&
-                line_px + glyph_w > max_px) {
-                out[o++] = '\n';
-                line_px = 0;
-            }
-
-            memcpy(out + o, in + glyph_start, glyph_bytes);
-            o += glyph_bytes;
-            line_px += glyph_w;
-            blank_run = 0;
+            /*
+             * Don't start a wrapped line with an ordinary space.
+             */
+            if (cp == ' ')
+                continue;
         }
 
-        i = token_end;
+        if (cp == ' ') {
+            out[o++] = ' ';
+        } else {
+            /*
+             * Copy the COMPLETE original UTF-8 sequence.
+             */
+            memcpy(out + o, in + start, bytes);
+            o += bytes;
+        }
+
+        line_px += char_w;
+        blank_run = 0;
     }
 
     out[o] = 0;
@@ -1262,6 +1209,10 @@ static int fetch_url(const char *url, mem_t *m, long *http_status) {
 
 
 #define UNICODE_FONT_FILE "APPS:[mini_browser]unifont_cjk.bin"
+
+#define UNICODE_GLYPH_BYTES 32
+#define UNICODE_GLYPH_W 16
+#define UNICODE_GLYPH_H 16
 
 #define UNICODE_CACHE_SIZE 128
 
@@ -1746,347 +1697,74 @@ static void draw_unicode_char(SDL_Renderer *r, int x, int y, unsigned cp) {
 
 
 
-typedef struct {
-    unsigned cp;
-    bool bold;
-    unsigned char dir;
-} visual_glyph_t;
-
-#define BIDI_LINE_MAX 256
-#define DIR_NEUTRAL 0
-#define DIR_LTR     1
-#define DIR_RTL     2
-
-typedef struct {
-    uint32_t base;
-    uint32_t isolated;
-    uint32_t final;
-    uint32_t initial;
-    uint32_t medial;
-} arabic_shape_t;
-
-/*
- * Arabic presentation-form mappings used by the compact Phase 2 shaper.
- * A zero form means that joining form does not exist for that character.
- * The table covers the standard Arabic alphabet plus common Persian/Urdu
- * letters for which Unicode provides one-code-point presentation forms.
- */
-static const arabic_shape_t g_arabic_shapes[] = {
-    {0x0621,0xFE80,0,0,0},{0x0622,0xFE81,0xFE82,0,0},
-    {0x0623,0xFE83,0xFE84,0,0},{0x0624,0xFE85,0xFE86,0,0},
-    {0x0625,0xFE87,0xFE88,0,0},{0x0626,0xFE89,0xFE8A,0xFE8B,0xFE8C},
-    {0x0627,0xFE8D,0xFE8E,0,0},{0x0628,0xFE8F,0xFE90,0xFE91,0xFE92},
-    {0x0629,0xFE93,0xFE94,0,0},{0x062A,0xFE95,0xFE96,0xFE97,0xFE98},
-    {0x062B,0xFE99,0xFE9A,0xFE9B,0xFE9C},{0x062C,0xFE9D,0xFE9E,0xFE9F,0xFEA0},
-    {0x062D,0xFEA1,0xFEA2,0xFEA3,0xFEA4},{0x062E,0xFEA5,0xFEA6,0xFEA7,0xFEA8},
-    {0x062F,0xFEA9,0xFEAA,0,0},{0x0630,0xFEAB,0xFEAC,0,0},
-    {0x0631,0xFEAD,0xFEAE,0,0},{0x0632,0xFEAF,0xFEB0,0,0},
-    {0x0633,0xFEB1,0xFEB2,0xFEB3,0xFEB4},{0x0634,0xFEB5,0xFEB6,0xFEB7,0xFEB8},
-    {0x0635,0xFEB9,0xFEBA,0xFEBB,0xFEBC},{0x0636,0xFEBD,0xFEBE,0xFEBF,0xFEC0},
-    {0x0637,0xFEC1,0xFEC2,0xFEC3,0xFEC4},{0x0638,0xFEC5,0xFEC6,0xFEC7,0xFEC8},
-    {0x0639,0xFEC9,0xFECA,0xFECB,0xFECC},{0x063A,0xFECD,0xFECE,0xFECF,0xFED0},
-    {0x0641,0xFED1,0xFED2,0xFED3,0xFED4},{0x0642,0xFED5,0xFED6,0xFED7,0xFED8},
-    {0x0643,0xFED9,0xFEDA,0xFEDB,0xFEDC},{0x0644,0xFEDD,0xFEDE,0xFEDF,0xFEE0},
-    {0x0645,0xFEE1,0xFEE2,0xFEE3,0xFEE4},{0x0646,0xFEE5,0xFEE6,0xFEE7,0xFEE8},
-    {0x0647,0xFEE9,0xFEEA,0xFEEB,0xFEEC},{0x0648,0xFEED,0xFEEE,0,0},
-    {0x0649,0xFEEF,0xFEF0,0xFBE8,0xFBE9},{0x064A,0xFEF1,0xFEF2,0xFEF3,0xFEF4},
-    {0x0671,0xFB50,0xFB51,0,0},{0x0677,0xFBDD,0,0,0},
-    {0x0679,0xFB66,0xFB67,0xFB68,0xFB69},{0x067A,0xFB5E,0xFB5F,0xFB60,0xFB61},
-    {0x067B,0xFB52,0xFB53,0xFB54,0xFB55},{0x067E,0xFB56,0xFB57,0xFB58,0xFB59},
-    {0x067F,0xFB62,0xFB63,0xFB64,0xFB65},{0x0680,0xFB5A,0xFB5B,0xFB5C,0xFB5D},
-    {0x0683,0xFB76,0xFB77,0xFB78,0xFB79},{0x0684,0xFB72,0xFB73,0xFB74,0xFB75},
-    {0x0686,0xFB7A,0xFB7B,0xFB7C,0xFB7D},{0x0687,0xFB7E,0xFB7F,0xFB80,0xFB81},
-    {0x0688,0xFB88,0xFB89,0,0},{0x068C,0xFB84,0xFB85,0,0},
-    {0x068D,0xFB82,0xFB83,0,0},{0x068E,0xFB86,0xFB87,0,0},
-    {0x0691,0xFB8C,0xFB8D,0,0},{0x0698,0xFB8A,0xFB8B,0,0},
-    {0x06A4,0xFB6A,0xFB6B,0xFB6C,0xFB6D},{0x06A6,0xFB6E,0xFB6F,0xFB70,0xFB71},
-    {0x06A9,0xFB8E,0xFB8F,0xFB90,0xFB91},{0x06AD,0xFBD3,0xFBD4,0xFBD5,0xFBD6},
-    {0x06AF,0xFB92,0xFB93,0xFB94,0xFB95},{0x06B1,0xFB9A,0xFB9B,0xFB9C,0xFB9D},
-    {0x06B3,0xFB96,0xFB97,0xFB98,0xFB99},{0x06BA,0xFB9E,0xFB9F,0,0},
-    {0x06BB,0xFBA0,0xFBA1,0xFBA2,0xFBA3},{0x06BE,0xFBAA,0xFBAB,0xFBAC,0xFBAD},
-    {0x06C0,0xFBA4,0xFBA5,0,0},{0x06C1,0xFBA6,0xFBA7,0xFBA8,0xFBA9},
-    {0x06C5,0xFBE0,0xFBE1,0,0},{0x06C6,0xFBD9,0xFBDA,0,0},
-    {0x06C7,0xFBD7,0xFBD8,0,0},{0x06C8,0xFBDB,0xFBDC,0,0},
-    {0x06C9,0xFBE2,0xFBE3,0,0},{0x06CB,0xFBDE,0xFBDF,0,0},
-    {0x06CC,0xFBFC,0xFBFD,0xFBFE,0xFBFF},{0x06D0,0xFBE4,0xFBE5,0xFBE6,0xFBE7},
-    {0x06D2,0xFBAE,0xFBAF,0,0},{0x06D3,0xFBB0,0xFBB1,0,0}
-};
-
-static const arabic_shape_t *arabic_shape_info(unsigned cp) {
-    for (size_t i = 0; i < sizeof(g_arabic_shapes) / sizeof(g_arabic_shapes[0]); i++) {
-        if (g_arabic_shapes[i].base == cp)
-            return &g_arabic_shapes[i];
-    }
-    return NULL;
-}
-
-static bool arabic_transparent(unsigned cp) {
-    return (cp >= 0x0610 && cp <= 0x061A) ||
-           (cp >= 0x064B && cp <= 0x065F) ||
-           cp == 0x0670 ||
-           (cp >= 0x06D6 && cp <= 0x06ED);
-}
-
-static void arabic_shape_line(visual_glyph_t *g, int count) {
-    unsigned original[BIDI_LINE_MAX];
-
-    for (int i = 0; i < count; i++)
-        original[i] = g[i].cp;
-
-    for (int i = 0; i < count; i++) {
-        const arabic_shape_t *cur = arabic_shape_info(original[i]);
-        if (!cur)
-            continue;
-
-        int p = i - 1;
-        while (p >= 0 && arabic_transparent(original[p]))
-            p--;
-
-        int n = i + 1;
-        while (n < count && arabic_transparent(original[n]))
-            n++;
-
-        const arabic_shape_t *prev = p >= 0 ? arabic_shape_info(original[p]) : NULL;
-        const arabic_shape_t *next = n < count ? arabic_shape_info(original[n]) : NULL;
-
-        bool join_prev = prev && prev->initial && cur->final;
-        bool join_next = next && cur->initial && next->final;
-
-        if (join_prev && join_next && cur->medial)
-            g[i].cp = cur->medial;
-        else if (join_prev && cur->final)
-            g[i].cp = cur->final;
-        else if (join_next && cur->initial)
-            g[i].cp = cur->initial;
-        else if (cur->isolated)
-            g[i].cp = cur->isolated;
-    }
-}
-
-static unsigned char bidi_dir(unsigned cp) {
-    /* European and Arabic-Indic numbers stay left-to-right as number runs. */
-    if ((cp >= '0' && cp <= '9') ||
-        (cp >= 0x0660 && cp <= 0x0669) ||
-        (cp >= 0x06F0 && cp <= 0x06F9))
-        return DIR_LTR;
-
-    if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z'))
-        return DIR_LTR;
-
-    if ((cp >= 0x0590 && cp <= 0x05FF) ||
-        (cp >= 0x0600 && cp <= 0x08FF) ||
-        (cp >= 0xFB1D && cp <= 0xFDFF) ||
-        (cp >= 0xFE70 && cp <= 0xFEFF))
-        return DIR_RTL;
-
-    if ((cp >= 0x00C0 && cp <= 0x02AF) ||
-        (cp >= 0x0370 && cp <= 0x058F) ||
-        (cp >= 0x0900 && cp <= 0x1FFF) ||
-        (cp >= 0x2C00 && cp <= 0xD7FF))
-        return DIR_LTR;
-
-    return DIR_NEUTRAL;
-}
-
-static int visual_glyph_width(unsigned cp) {
-    return wrap_glyph_width(cp);
-}
-
-static void reverse_glyphs(visual_glyph_t *g, int a, int b) {
-    while (a < b) {
-        visual_glyph_t t = g[a];
-        g[a] = g[b];
-        g[b] = t;
-        a++;
-        b--;
-    }
-}
-
-/*
- * Compact embedded bidi pass. It handles the common browser cases we need:
- * RTL paragraph detection, Hebrew/Arabic runs, mixed LTR text and numbers,
- * and neutral punctuation/spaces. It is intentionally bounded and is not a
- * complete implementation of every Unicode Bidirectional Algorithm rule.
- */
-static int bidi_visualize_line(visual_glyph_t *g, int count, bool *base_rtl) {
-    if (count <= 0) {
-        *base_rtl = false;
-        return count;
-    }
-
-    unsigned char base = DIR_LTR;
-    for (int i = 0; i < count; i++) {
-        unsigned char d = bidi_dir(g[i].cp);
-        if (d != DIR_NEUTRAL) {
-            base = d;
-            break;
-        }
-    }
-    *base_rtl = (base == DIR_RTL);
-
-    for (int i = 0; i < count; i++)
-        g[i].dir = bidi_dir(g[i].cp);
-
-    /* Resolve neutral characters from their neighbors, otherwise paragraph base. */
-    for (int i = 0; i < count; i++) {
-        if (g[i].dir != DIR_NEUTRAL)
-            continue;
-
-        unsigned char left = DIR_NEUTRAL;
-        unsigned char right = DIR_NEUTRAL;
-
-        for (int p = i - 1; p >= 0; p--) {
-            if (g[p].dir != DIR_NEUTRAL) {
-                left = g[p].dir;
-                break;
-            }
-        }
-        for (int n = i + 1; n < count; n++) {
-            if (g[n].dir != DIR_NEUTRAL) {
-                right = g[n].dir;
-                break;
-            }
-        }
-
-        g[i].dir = (left != DIR_NEUTRAL && left == right) ? left : base;
-    }
-
-    visual_glyph_t tmp[BIDI_LINE_MAX];
-    int out = 0;
-
-    if (base == DIR_LTR) {
-        int i = 0;
-        while (i < count) {
-            int j = i + 1;
-            while (j < count && g[j].dir == g[i].dir)
-                j++;
-
-            if (g[i].dir == DIR_RTL) {
-                for (int k = j - 1; k >= i; k--)
-                    tmp[out++] = g[k];
-            } else {
-                for (int k = i; k < j; k++)
-                    tmp[out++] = g[k];
-            }
-            i = j;
-        }
-    } else {
-        int j = count;
-        while (j > 0) {
-            int i = j - 1;
-            while (i > 0 && g[i - 1].dir == g[j - 1].dir)
-                i--;
-
-            if (g[i].dir == DIR_RTL) {
-                for (int k = j - 1; k >= i; k--)
-                    tmp[out++] = g[k];
-            } else {
-                for (int k = i; k < j; k++)
-                    tmp[out++] = g[k];
-            }
-            j = i;
-        }
-    }
-
-    memcpy(g, tmp, (size_t)out * sizeof(g[0]));
-    return out;
-}
-
-static void draw_visual_line(SDL_Renderer *r, int x, int y,
-                             visual_glyph_t *g, int count, int max_w) {
-    if (count <= 0)
-        return;
-
-    arabic_shape_line(g, count);
-
-    bool base_rtl = false;
-    count = bidi_visualize_line(g, count, &base_rtl);
-
-    int line_w = 0;
-    for (int i = 0; i < count; i++)
-        line_w += visual_glyph_width(g[i].cp);
-
-    int cx = x;
-    if (base_rtl && line_w < max_w)
-        cx = x + max_w - line_w;
-
-    int cy = y;
-
-    for (int i = 0; i < count; i++) {
-        unsigned cp = g[i].cp;
-        if (cp == 0xA0)
-            cp = ' ';
-
-        int char_w = visual_glyph_width(cp);
-        if (char_w <= 0)
-            continue;
-
-        if (cx + char_w > x + max_w) {
-            cx = x;
-            cy += (CH_H + LINE_SPACING);
-        }
-
-        if (cp >= 32 && cp <= 126) {
-            draw_char(r, cx, cy, (char)cp);
-            if (g[i].bold)
-                draw_char(r, cx + 1, cy, (char)cp);
-        } else if (cp >= 0x80 && cp <= 0x10FFFF) {
-            draw_unicode_char(r, cx, cy, cp);
-            if (g[i].bold)
-                draw_unicode_char(r, cx + 1, cy, cp);
-        }
-
-        cx += char_w;
-    }
-}
-
 static void draw_text(SDL_Renderer *r, int x, int y, const char *s, int max_w) {
     if (!r || !s) return;
 
+    int cx = x;
+    int cy = y;
     size_t i = 0;
     size_t L = strlen(s);
-    int cy = y;
     int bold_depth = 0;
 
-    while (i <= L) {
-        visual_glyph_t line[BIDI_LINE_MAX];
-        int count = 0;
-        bool saw_newline = false;
+    while (i < L) {
+        unsigned cp = utf8_next(s, L, &i);
 
-        while (i < L) {
-            unsigned cp = utf8_next(s, L, &i);
-            if (cp == 0)
-                break;
+        if (cp == 0)
+            break;
 
-            if (cp == TEXT_BOLD_ON) {
-                bold_depth++;
-                continue;
-            }
-            if (cp == TEXT_BOLD_OFF) {
-                if (bold_depth > 0)
-                    bold_depth--;
-                continue;
-            }
-            if (cp == '\n') {
-                saw_newline = true;
-                break;
-            }
-
-            if (count < BIDI_LINE_MAX) {
-                line[count].cp = cp;
-                line[count].bold = bold_depth > 0;
-                line[count].dir = DIR_NEUTRAL;
-                count++;
-            }
+        if (cp == TEXT_BOLD_ON) {
+            bold_depth++;
+            continue;
         }
 
-        draw_visual_line(r, x, cy, line, count, max_w);
+        if (cp == TEXT_BOLD_OFF) {
+            if (bold_depth > 0)
+                bold_depth--;
+            continue;
+        }
 
-        if (saw_newline) {
+        if (cp == '\n') {
+            cx = x;
             cy += (CH_H + LINE_SPACING);
             continue;
         }
-        break;
+
+        if (cp == 0xA0)
+            cp = ' ';
+
+        /*
+         * Existing ASCII path.
+         */
+        if (cp >= 32 && cp <= 126) {
+            int char_w = (FONT_W_COLS + FONT_COL_GAP) * FONT_SCALE;
+
+            if (cx + char_w > x + max_w) {
+                cx = x;
+                cy += (CH_H + LINE_SPACING);
+            }
+
+            draw_char(r, cx, cy, (char)cp);
+            if (bold_depth > 0)
+                draw_char(r, cx + 1, cy, (char)cp);
+            cx += char_w;
+            continue;
+        }
+
+        /*
+         * Temporary Unicode test path.
+         */
+        if (cp >= 0x80 && cp <= 0x10FFFF) {
+            int char_w = UNICODE_GLYPH_W + 1;
+            if (cx + char_w > x + max_w) {
+                cx = x;
+                cy += (CH_H + LINE_SPACING);
+            }
+
+            draw_unicode_char(r, cx, cy, cp);
+            if (bold_depth > 0)
+                draw_unicode_char(r, cx + 1, cy, cp);
+            cx += char_w;
+        }
     }
 }
 
