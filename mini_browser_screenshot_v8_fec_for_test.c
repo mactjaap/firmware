@@ -22,9 +22,6 @@
 # define YIELD_NET() ((void)0)
 #endif
 
-/* ---------- Mini Browser version ---------- */
-#define MINI_BROWSER_VERSION "2.3"
-
 /* ---------- Limits & layout ---------- */
 #define MAX_BYTES     (64 * 1024)
 #define TIMEOUT_S     10
@@ -1157,9 +1154,9 @@ static int fetch_url(const char *url, mem_t *m, long *http_status) {
     struct curl_slist *hdrs = NULL;
 
     hdrs = curl_slist_append(hdrs,
-        "User-Agent: Mozilla/5.0 (BadgeVMS; ESP32; rv:" MINI_BROWSER_VERSION ") "
+        "User-Agent: Mozilla/5.0 (BadgeVMS; ESP32; rv:2.1) "
         "Gecko/20100101 "
-        "(compatible; MiniBrowser/" MINI_BROWSER_VERSION "; +https://github.com/mactjaap/mini_browser/; HTTP/1.1; identity)");
+        "(compatible; MiniBrowser/2.1; +https://github.com/mactjaap/mini_browser/; HTTP/1.1; identity)");
 
     hdrs = curl_slist_append(hdrs,
         "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
