@@ -36,7 +36,7 @@ import serial
 
 CONFIG = {
     "serial": {
-        "device": "/dev/cu.wchusbserial10",
+        "device": "/dev/cu.wchusbserial110",
         "baudrate": 115200,
         "startup_delay": 2.0,
         "default_timeout": 1000,
@@ -145,7 +145,7 @@ CONFIG = {
                 "name": "Google search",
                 "source": "home",
                 "query": "esp32",
-                "submit_label": "[google search]",
+                "submit_label": "[search google]",
                 "result_expect": r"HTTP 200.*google",
                 "numbered_fallback": {
                     "start": 18,
@@ -157,7 +157,7 @@ CONFIG = {
                 "name": "Google search Mini Browser",
                 "source": "home",
                 "query": "why2025 mini_browser",
-                "submit_label": "[google search]",
+                "submit_label": "[search google]",
                 "result_expect": r"HTTP 200.*google",
                 "numbered_fallback": {
                     "start": 18,
@@ -169,7 +169,7 @@ CONFIG = {
                 "name": "Google search MacIPRpi",
                 "source": "home",
                 "query": "MacIPRpi",
-                "submit_label": "[google search]",
+                "submit_label": "[search google]",
                 "result_expect": r"HTTP 200.*google",
                 "numbered_fallback": {
                     "start": 18,
