@@ -5,7 +5,7 @@ ESP32-P4 based WHY2025 badge.
 
 It is based on the original WHY2025 BadgeVMS firmware, but includes my
 own launcher/UI changes, application selection and ordering, and the
-latest **Mini Browser 2.3** with extended Unicode support.
+latest **Mini Browser 2.5** with extended Unicode support.
 
 ![BadgeVMS Logo](misc/BadgeVMS.png)
 
@@ -31,12 +31,14 @@ Changes include:
     started manually are hidden from the normal application list.
 -   Updated About/information presentation and launcher navigation.
 
-### Mini Browser 2.3
+![Badge menu screenshot](badge_launcher.png)
+
+### Mini Browser 2.5
 
 This firmware includes **Mini Browser 2.3**, my lightweight browser
 designed specifically for BadgeVMS.
 
-Mini Browser 2.3 includes:
+Mini Browser 2.5 includes:
 
 -   HTTP and HTTPS browsing using libcurl.
 -   HTML text rendering.
@@ -56,6 +58,7 @@ Mini Browser 2.3 includes:
 -   Real rendered bold text for HTML `<b>` and `<strong>`.
 -   Compatibility-friendly ASCII list markers when the external Unicode
     font is unavailable.
+-   ..and more
 
 The Unicode font is included in the firmware storage so a normal
 build/flash of this firmware provides the extended Mini Browser
