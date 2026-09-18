@@ -35,7 +35,7 @@ Changes include:
 
 ### Mini Browser 2.5
 
-This firmware includes **Mini Browser 2.3**, my lightweight browser
+This firmware includes **Mini Browser 2.5**, my lightweight browser
 designed specifically for BadgeVMS.
 
 Mini Browser 2.5 includes:
