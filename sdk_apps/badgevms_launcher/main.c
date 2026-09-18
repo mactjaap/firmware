@@ -14,6 +14,7 @@
 #include <badgevms/event.h>
 #include <badgevms/keyboard.h>
 
+
 /* ===========================================================
    Display
    =========================================================== */
@@ -182,163 +183,215 @@ static void draw_focus(fbview_t *ctx, int x, int y, int w, int h) {
 }
 
 /* ===========================================================
-   Vector icons — bolder, two-tone where needed
+   Vector icons — Mini Browser 2.6 launcher makeover
+
+   All icons are drawn from framebuffer primitives.  There are no image
+   files, decoders or heap allocations.  The Mini Browser icon deliberately
+   ignores the selected state so its normal and highlighted appearance are
+   identical; selection is already communicated by the launcher row/focus.
    =========================================================== */
+static void draw_circle_outline(fbview_t *ctx, int cx,int cy,int r,uint32_t rgb,int thick){
+    if (r <= 0) return;
+    if (thick < 1) thick = 1;
+    for (int t=0; t<thick; ++t) {
+        int rr = r - t;
+        if (rr <= 0) break;
+        int x=rr,y=0,err=1-rr;
+        while (x>=y){
+            put_px(ctx,cx+x,cy+y,rgb); put_px(ctx,cx+y,cy+x,rgb);
+            put_px(ctx,cx-y,cy+x,rgb); put_px(ctx,cx-x,cy+y,rgb);
+            put_px(ctx,cx-x,cy-y,rgb); put_px(ctx,cx-y,cy-x,rgb);
+            put_px(ctx,cx+y,cy-x,rgb); put_px(ctx,cx+x,cy-y,rgb);
+            y++;
+            if (err<0) err += 2*y + 1;
+            else { x--; err += 2*(y - x + 1); }
+        }
+    }
+}
+
+/* Mini Browser: same cyan/blue globe + purple/magenta orbit as 2.6. */
 static void icon_browser(fbview_t *ctx, int x,int y,int sz,bool sel){
-    int r = sz/3, cx = x + sz/2 - 2, cy = y + sz/2 - 2;
-    draw_circle_filled(ctx, cx, cy, r, sel ? COL_ACCENT_1 : COL_ACCENT_2);
-    draw_thick_line(ctx, cx + r/2, cy + r/2, x + sz - 3, y + sz - 3, 0xFFFFFF, 2);
+    (void)sel; /* intentionally identical in normal and selected rows */
+    int cx = x + sz*46/100;
+    int cy = y + sz*52/100;
+    int r  = sz*31/100;
+    int t  = (sz >= 40) ? 2 : 1;
+
+    /* Dark tile blends into the launcher's icon well. */
+    draw_rect(ctx, x, y, sz, sz, 0x080A0C);
+
+    /* Globe shell and latitude grid. */
+    draw_circle_outline(ctx,cx,cy,r,0x00DCFF,t);
+    draw_thick_line(ctx,cx-r+3,cy-r/3,cx+r-3,cy-r/3,0x00BFEF,t);
+    draw_thick_line(ctx,cx-r,  cy,    cx+r,  cy,    0x00DCFF,t);
+    draw_thick_line(ctx,cx-r+3,cy+r/3,cx+r-3,cy+r/3,0x008CFF,t);
+
+    /* Longitude curves, intentionally angular at this icon resolution. */
+    draw_thick_line(ctx,cx,cy-r,cx,cy+r,0x00DCFF,t);
+    draw_thick_line(ctx,cx-3,cy-r+2,cx-r/2,cy,0x00BFEF,t);
+    draw_thick_line(ctx,cx-r/2,cy,cx-3,cy+r-2,0x008CFF,t);
+    draw_thick_line(ctx,cx+3,cy-r+2,cx+r/2,cy,0x6E62FF,t);
+    draw_thick_line(ctx,cx+r/2,cy,cx+3,cy+r-2,0x6E62FF,t);
+
+    /* Orbital ring: cyan comes in from the left, purple exits top-right. */
+    int ox0=x+1,      oy0=y+sz*72/100;
+    int ox1=x+sz/5,   oy1=y+sz*70/100;
+    int ox2=x+sz*2/5, oy2=y+sz*59/100;
+    int ox3=x+sz*3/5, oy3=y+sz*47/100;
+    int ox4=x+sz*4/5, oy4=y+sz*31/100;
+    int ox5=x+sz-4,   oy5=y+sz*17/100;
+    draw_thick_line(ctx,ox0,oy0,ox1,oy1,0x00E6FF,t+1);
+    draw_thick_line(ctx,ox1,oy1,ox2,oy2,0x00D7FF,t+1);
+    draw_thick_line(ctx,ox2,oy2,ox3,oy3,0x6D45FF,t+1);
+    draw_thick_line(ctx,ox3,oy3,ox4,oy4,0xA92CFF,t+1);
+    draw_thick_line(ctx,ox4,oy4,ox5,oy5,0xE327F4,t+1);
+
+    /* Magenta planet and tiny highlight. */
+    int pr = (sz >= 40) ? 5 : 3;
+    draw_circle_filled(ctx,ox5,oy5,pr,0xE923F4);
+    draw_circle_filled(ctx,ox5-1,oy5-1,(pr>=4)?2:1,0xFF9CFF);
 }
 
+/* Settings: cyan/purple gear with a bright hub. */
 static void icon_settings(fbview_t *ctx, int x,int y,int sz,bool sel){
-    int r = sz/3, cx = x + sz/2, cy = y + sz/2;
-    uint32_t ring = sel ? COL_ACCENT_3 : COL_ACCENT_4;
+    int cx=x+sz/2, cy=y+sz/2, r=sz/4;
+    uint32_t gear = sel ? 0x64EFFE : 0x8B5CFF;
+    uint32_t tip  = sel ? 0xF25E95 : 0x64EFFE;
     const int d[8][2]={{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
     for(int i=0;i<8;i++){
         int dx=d[i][0],dy=d[i][1];
-        draw_thick_line(ctx, cx+dx*(r+2), cy+dy*(r+2), cx+dx*(r+7), cy+dy*(r+7), 0xFFFFFF, 2);
+        draw_thick_line(ctx,cx+dx*(r-1),cy+dy*(r-1),cx+dx*(r+7),cy+dy*(r+7),tip,3);
     }
-    draw_circle_filled(ctx,cx,cy,r,ring);
-    draw_circle_filled(ctx,cx,cy,r/2,COL_PANEL);
+    draw_circle_filled(ctx,cx,cy,r+2,gear);
+    draw_circle_filled(ctx,cx,cy,r/2,0x0A0E14);
+    draw_circle_outline(ctx,cx,cy,r/2+2,0xFFFFFF,1);
 }
 
-static void icon_settings2(fbview_t *ctx, int x,int y,int sz,bool sel){
-    int r = sz/3, cx = x + sz/2, cy = y + sz/2;
-    uint32_t ring = sel ? COL_ACCENT_5 : COL_ACCENT_6;
-    const int d[8][2]={{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}};
-    for(int i=0;i<8;i++){
-        int dx=d[i][0],dy=d[i][1];
-        draw_thick_line(ctx, cx+dx*(r+2), cy+dy*(r+2), cx+dx*(r+7), cy+dy*(r+7), 0xFFFFFF, 2);
-    }
-    draw_circle_filled(ctx,cx,cy,r,ring);
-    draw_circle_filled(ctx,cx,cy,r/2,COL_PANEL);
+/* OTA/update: rocket instead of a second gear. */
+static void icon_ota(fbview_t *ctx, int x,int y,int sz,bool sel){
+    uint32_t body = sel ? 0xFFFFFF : 0x64EFFE;
+    uint32_t nose = sel ? 0xF25E95 : 0xA92CFF;
+    uint32_t fire = 0xFFFB96;
+    int cx=x+sz/2;
+    draw_circle_filled(ctx,cx,y+sz/3,sz/7,nose);
+    draw_rect(ctx,cx-sz/7,y+sz/3,2*(sz/7)+1,sz/3,body);
+    draw_thick_line(ctx,cx-sz/7,y+sz*3/5,cx-sz/4,y+sz*3/4,nose,3);
+    draw_thick_line(ctx,cx+sz/7,y+sz*3/5,cx+sz/4,y+sz*3/4,nose,3);
+    draw_thick_line(ctx,cx,y+sz*2/3,cx,y+sz-5,fire,4);
+    draw_circle_filled(ctx,cx,y+sz/2,sz/14,0x0A0E14);
 }
 
+/* Wi-Fi: clean three-arc radio mark with pink status dot. */
 static void icon_wifi(fbview_t *ctx, int x,int y,int sz,bool sel){
-    uint32_t c = sel ? COL_ACCENT_2 : COL_ACCENT_1;
-    int cx = x + sz/2, base = y + sz/2 + 6;
-    draw_thick_line(ctx, cx - sz/6, base - sz/6, cx + sz/6, base - sz/6, c, 2); /* add a small bold top tick */
-    draw_semicircle_top_outline(ctx, cx, base, sz/6, c);
-    draw_semicircle_top_outline(ctx, cx, base, sz/4, c);
-    draw_semicircle_top_outline(ctx, cx, base, sz/3, c);
-    draw_circle_filled(ctx, cx, base + 6, 3, c);
+    uint32_t c = sel ? 0x64EFFE : 0xFFFFFF;
+    int cx=x+sz/2, base=y+sz*3/4;
+    draw_semicircle_top_outline(ctx,cx,base,sz/6,c);
+    draw_semicircle_top_outline(ctx,cx,base,sz/4,c);
+    draw_semicircle_top_outline(ctx,cx,base,sz/3,c);
+    /* thicken the arcs with a second shifted pass */
+    draw_semicircle_top_outline(ctx,cx,base+1,sz/6,c);
+    draw_semicircle_top_outline(ctx,cx,base+1,sz/4,c);
+    draw_semicircle_top_outline(ctx,cx,base+1,sz/3,c);
+    draw_circle_filled(ctx,cx,base+2,4,sel?0xF25E95:0xFFFB96);
 }
 
+/* Snake: a real little pixel snake, rather than a straight arrow. */
 static void icon_snake(fbview_t *ctx, int x,int y,int sz,bool sel){
-    uint32_t c = sel ? COL_ACCENT_4 : COL_ACCENT_3;
-    int L=x+sz/6,R=x+sz-sz/6,M=y+sz/2;
-    draw_thick_line(ctx,L,M,R,M,c,2);
-    draw_thick_line(ctx,R,M,R-6,M-6,c,2);
-    draw_thick_line(ctx,R,M,R-6,M+6,c,2);
+    uint32_t c = sel ? 0x64EFFE : 0xF25E95;
+    uint32_t head = sel ? 0xFFFB96 : 0x8B5CFF;
+    int t=4;
+    draw_thick_line(ctx,x+7,y+sz*2/3,x+sz/3,y+sz*2/3,c,t);
+    draw_thick_line(ctx,x+sz/3,y+sz*2/3,x+sz/3,y+sz/3,c,t);
+    draw_thick_line(ctx,x+sz/3,y+sz/3,x+sz*2/3,y+sz/3,c,t);
+    draw_thick_line(ctx,x+sz*2/3,y+sz/3,x+sz*2/3,y+sz/2,c,t);
+    draw_circle_filled(ctx,x+sz*2/3,y+sz/2,6,head);
+    put_px(ctx,x+sz*2/3+2,y+sz/2-2,0x0A0E14);
+    draw_thick_line(ctx,x+sz*2/3+5,y+sz/2+1,x+sz-3,y+sz/2+4,0xF24436,1);
 }
 
+/* Chip/hardware/DOOM: neon microchip with a dark silicon core. */
 static void icon_chip(fbview_t *ctx, int x,int y,int sz,bool sel){
-    uint32_t c1 = sel ? COL_ACCENT_6 : COL_ACCENT_5, c2 = 0xFFFFFF;
-    draw_rect(ctx, x+3, y+3, sz-6, sz-6, c1);
-    for (int k=2;k<sz-2;k+=6){
-        draw_rect(ctx,x+k,y+1,2,3,c2); draw_rect(ctx,x+k,y+sz-4,2,3,c2);
-        draw_rect(ctx,x+1,y+k,3,2,c2); draw_rect(ctx,x+sz-4,y+k,3,2,c2);
+    uint32_t edge = sel ? 0xF25E95 : 0x64EFFE;
+    uint32_t core = sel ? 0x5233BF : 0x2E1A64;
+    int m=8;
+    draw_rect(ctx,x+m,y+m,sz-2*m,sz-2*m,core);
+    draw_hline(ctx,x+m,y+m,sz-2*m,edge);
+    draw_hline(ctx,x+m,y+sz-m-1,sz-2*m,edge);
+    draw_vline(ctx,x+m,y+m,sz-2*m,edge);
+    draw_vline(ctx,x+sz-m-1,y+m,sz-2*m,edge);
+    for(int k=12;k<sz-10;k+=8){
+        draw_rect(ctx,x+k,y+3,2,6,edge); draw_rect(ctx,x+k,y+sz-9,2,6,edge);
+        draw_rect(ctx,x+3,y+k,6,2,edge); draw_rect(ctx,x+sz-9,y+k,6,2,edge);
     }
+    draw_rect(ctx,x+m+6,y+m+6,sz-2*m-12,sz-2*m-12,0x0A0E14);
+    draw_rect(ctx,x+m+9,y+m+9,5,5,sel?0xFFFB96:0xF25E95);
 }
 
-/* NEW: Name tag (WHY2025 Namebadge) — bold two-tone ID card */
+/* Name badge: WHY palette ID card with avatar and two text strokes. */
 static void icon_nametag(fbview_t *ctx, int x,int y,int sz,bool sel){
-    int rx = x+4, ry = y+6, rw = sz-8, rh = sz-12;
-    uint32_t body = sel ? COL_ACCENT_4 : COL_ACCENT_5;  /* purple / dark purple */
-    uint32_t head = COL_ACCENT_2;                       /* cyan header strip */
-    uint32_t text1= 0xFFFFFF;                           /* white label line */
-    uint32_t text2= COL_ACCENT_6;                       /* red label line */
-    /* card body */
-    draw_rect(ctx, rx, ry, rw, rh, body);
-    /* header stripe */
-    draw_rect(ctx, rx, ry, rw, 6, head);
-    /* avatar dot */
-    draw_circle_filled(ctx, rx+10, ry+14, 5, COL_ACCENT_1); /* yellow */
-    /* text lines */
-    draw_rect(ctx, rx+22, ry+12, rw-26, 4, text1);
-    draw_rect(ctx, rx+22, ry+20, rw-30, 3, text2);
-    /* bottom slot detail */
-    draw_rect(ctx, rx+rw/3, ry+rh-6, rw/3, 3, 0xFFFFFF);
+    int rx=x+4, ry=y+7, rw=sz-8, rh=sz-14;
+    uint32_t body=sel?0x5233BF:0x2E1A64;
+    draw_rect(ctx,rx,ry,rw,rh,body);
+    draw_rect(ctx,rx,ry,rw,6,0x64EFFE);
+    draw_circle_filled(ctx,rx+11,ry+17,6,sel?0xFFFB96:0xF25E95);
+    draw_rect(ctx,rx+22,ry+13,rw-27,4,0xFFFFFF);
+    draw_rect(ctx,rx+22,ry+21,rw-31,3,0xF25E95);
+    draw_rect(ctx,rx+rw/3,ry+rh-5,rw/3,2,0x64EFFE);
 }
 
-/* NEW: Sponsors — bright thick star on dark circular badge */
+/* Sponsors: luminous five-point star with cyan/pink centre. */
 static void icon_star_bold(fbview_t *ctx, int x,int y,int sz,bool sel){
-    int cx = x + sz/2, cy = y + sz/2;
-    int r_bg = sz/2 - 3;
-    /* dark circle background for contrast */
-    draw_circle_filled(ctx, cx, cy, r_bg, COL_ACCENT_5);
-    /* star points (simple 5-point star) */
-    int r = sz/3;
-    int px[5] = { cx, cx + r, cx + r/3, cx - r/3, cx - r };
-    int py[5] = { cy - r, cy - r/3, cy + r,     cy + r,     cy - r/3 };
-    uint32_t edge = sel ? COL_ACCENT_1 : 0xFFFFFF; /* yellow when selected, else white */
-    /* draw thick edges */
-    for (int i=0;i<5;i++){
+    int cx=x+sz/2, cy=y+sz/2, r=sz/3;
+    int px[5]={cx,cx+r,cx+r/3,cx-r/3,cx-r};
+    int py[5]={cy-r,cy-r/3,cy+r,cy+r,cy-r/3};
+    uint32_t edge=sel?0xFFFB96:0xFFFFFF;
+    draw_circle_filled(ctx,cx,cy,sz/2-4,0x2E1A64);
+    for(int i=0;i<5;i++){
         int j=(i+2)%5;
-        draw_thick_line(ctx, px[i], py[i], px[j], py[j], edge, 3);
+        draw_thick_line(ctx,px[i],py[i],px[j],py[j],edge,3);
     }
-    /* small inner star highlight */
-    for (int i=0;i<5;i++){
-        int j=(i+2)%5;
-        draw_thick_line(ctx, (px[i]+px[j])/2, (py[i]+py[j])/2, cx, cy, COL_ACCENT_3, 2);
-    }
+    draw_circle_filled(ctx,cx,cy,5,sel?0xF25E95:0x64EFFE);
 }
 
-
-
-/* Simple bold plug icon (used for curl/serial) */
+/* Curl/serial: compact USB-style plug with neon cable. */
 static void icon_plug(fbview_t *ctx, int x,int y,int sz,bool sel){
-    /* two-tone to pop on dark bg */
-    uint32_t body  = sel ? COL_ACCENT_3 : 0xFFFFFF;  /* pink/white */
-    uint32_t accent= sel ? COL_ACCENT_6 : COL_ACCENT_2;  /* red/cyan */
-
-    /* plug body */
-    int bw = sz * 5 / 10;
-    int bh = sz * 4 / 10;
-    int bx = x + (sz - bw)/2;
-    int by = y + sz/2 - bh/2;
-    draw_rect(ctx, bx, by, bw, bh, body);
-
-    /* prongs (top) */
-    int prw = sz/8, prh = sz/6;
-    int gap = sz/10;
-    int p1x = bx + bw/2 - prw - gap/2;
-    int p2x = bx + bw/2 + gap/2;
-    int py  = by - prh + 2;
-    draw_rect(ctx, p1x, py, prw, prh, body);
-    draw_rect(ctx, p2x, py, prw, prh, body);
-
-    /* cable tail (bottom) */
-    int tailw = sz/6, tailh = sz/5;
-    int tx = x + sz/2 - tailw/2;
-    int ty = by + bh - 1;
-    draw_rect(ctx, tx, ty, tailw, tailh, accent);
-
-    /* little highlight stripe */
-    draw_rect(ctx, bx+2, by+2, bw-4, 3, accent);
+    uint32_t body=sel?0xFFFFFF:0x64EFFE;
+    uint32_t accent=sel?0xF25E95:0x8B5CFF;
+    int bw=sz/2, bh=sz*2/5, bx=x+(sz-bw)/2, by=y+sz/3;
+    draw_rect(ctx,bx,by,bw,bh,body);
+    draw_rect(ctx,bx+5,by-7,5,8,body);
+    draw_rect(ctx,bx+bw-10,by-7,5,8,body);
+    draw_rect(ctx,bx+4,by+5,bw-8,4,accent);
+    draw_thick_line(ctx,x+sz/2,by+bh-1,x+sz/2,y+sz-4,accent,4);
 }
 
-
+/* Hello: friendly face in the same neon palette. */
+static void icon_hello(fbview_t *ctx, int x,int y,int sz,bool sel){
+    uint32_t face=sel?0xFFFB96:0x64EFFE;
+    int cx=x+sz/2,cy=y+sz/2,r=sz/3;
+    draw_circle_outline(ctx,cx,cy,r,face,2);
+    draw_circle_filled(ctx,cx-r/3,cy-r/4,2,0xFFFFFF);
+    draw_circle_filled(ctx,cx+r/3,cy-r/4,2,0xFFFFFF);
+    draw_thick_line(ctx,cx-r/3,cy+r/4,cx,cy+r/3,0xF25E95,2);
+    draw_thick_line(ctx,cx,cy+r/3,cx+r/3,cy+r/4,0xF25E95,2);
+}
 
 /* UID->icon mapping */
 static void draw_app_icon(fbview_t *ctx, const char *uid, int x, int y, int sz, bool selected) {
     if (!uid) uid = "";
     if (strstr(uid, "mini_browser"))      { icon_browser(ctx, x, y, sz, selected); return; }
-    if (strstr(uid, "settings"))          { icon_settings(ctx, x, y, sz, selected); return; }
-    if (strstr(uid, "why2025_namebadge")) { icon_nametag(ctx,  x, y, sz, selected); return; }
-    if (strstr(uid, "sponsors"))          { icon_star_bold(ctx,x, y, sz, selected); return; }
-    if (strstr(uid, "wifi"))              { icon_wifi(ctx,     x, y, sz, selected); return; }
-    if (strstr(uid, "sdl_test"))          { icon_snake(ctx,    x, y, sz, selected); return; }
-    if (strstr(uid, "doom"))              { icon_chip(ctx,     x, y, sz, selected); return; }
-    if (strstr(uid, "curl"))              { icon_plug(ctx,     x, y, sz, selected); return; }
-    if (strstr(uid, "serial"))            { icon_plug(ctx,     x, y, sz, selected); return; }
-    if (strstr(uid, "hardware"))          { icon_chip(ctx,     x, y, sz, selected); return; }
-    if (strstr(uid, "hello"))             { /* reuse nametag colours for visibility */
-        int r = sz/3, cx = x + sz/2; int cy = y + sz/2;
-        draw_circle_filled(ctx, cx, cy, r, selected ? COL_ACCENT_1 : COL_ACCENT_2);
-        draw_thick_line(ctx, cx - r/2, cy, cx + r/2, cy, 0x111111, 3);
-    } else if (strstr(uid, "ota"))        { icon_settings2(ctx,x, y, sz, selected); return; }
-    else                                  { icon_chip(ctx,     x, y, sz, selected); }
+    if (strstr(uid, "settings"))          { icon_settings(ctx,x, y, sz, selected); return; }
+    if (strstr(uid, "why2025_namebadge")) { icon_nametag(ctx, x, y, sz, selected); return; }
+    if (strstr(uid, "sponsors"))          { icon_star_bold(ctx,x,y,sz,selected); return; }
+    if (strstr(uid, "wifi"))              { icon_wifi(ctx,x,y,sz,selected); return; }
+    if (strstr(uid, "sdl_test"))          { icon_snake(ctx,x,y,sz,selected); return; }
+    if (strstr(uid, "doom"))              { icon_chip(ctx,x,y,sz,selected); return; }
+    if (strstr(uid, "curl"))              { icon_plug(ctx,x,y,sz,selected); return; }
+    if (strstr(uid, "serial"))            { icon_plug(ctx,x,y,sz,selected); return; }
+    if (strstr(uid, "hardware"))          { icon_chip(ctx,x,y,sz,selected); return; }
+    if (strstr(uid, "hello"))             { icon_hello(ctx,x,y,sz,selected); return; }
+    if (strstr(uid, "ota"))               { icon_ota(ctx,x,y,sz,selected); return; }
+    icon_chip(ctx,x,y,sz,selected);
 }
 
 /* ===========================================================
@@ -355,6 +408,7 @@ typedef struct {
     int             items_per_page;
     bool            show_about;
     bool            quit;
+    bool            screenshot_pending;
     int             about_index;
 } Launcher_Context;
 
@@ -485,6 +539,191 @@ static void draw_about(Launcher_Context *ctx, application_t *app) {
 }
 
 /* ===========================================================
+   Serial screenshot streaming — Mini Browser compatible
+   =========================================================== */
+
+/*
+ * WHY+S requests a screenshot of the visible 720x720 launcher framebuffer.
+ *
+ * This deliberately uses the same RGB24/RLE5FEC1 serial wire protocol as
+ * Mini Browser, so the existing badge_screenshot.py receiver can be reused.
+ * The launcher already owns an RGB565 framebuffer, therefore no SDL readback,
+ * PNG/JPEG decoder, second framebuffer, or large temporary allocation is
+ * needed. Pixels are converted RGB565 -> RGB24 one run at a time.
+ */
+#define IMG_RAW_CHUNK       48
+#define IMG_FEC_GROUP        4
+#define SCREENSHOT_PACE_MS   8
+
+typedef struct {
+    unsigned char raw[IMG_RAW_CHUNK];
+    size_t used;
+    unsigned sequence;
+    unsigned long compressed_bytes;
+    unsigned crc;
+    unsigned char parity[IMG_RAW_CHUNK];
+    unsigned parity_count;
+    unsigned parity_group;
+} screenshot_stream_t;
+
+static unsigned screenshot_crc32_update(unsigned crc, const unsigned char *data, size_t len) {
+    while (len--) {
+        crc ^= *data++;
+        for (int bit = 0; bit < 8; bit++) {
+            unsigned mask = (unsigned)-(int)(crc & 1U);
+            crc = (crc >> 1) ^ (0xEDB88320U & mask);
+        }
+    }
+    return crc;
+}
+
+static unsigned screenshot_crc32(const unsigned char *data, size_t len) {
+    unsigned crc = 0xFFFFFFFFU;
+    crc = screenshot_crc32_update(crc, data, len);
+    return crc ^ 0xFFFFFFFFU;
+}
+
+static size_t screenshot_base64_encode(char *out, size_t out_size,
+                                       const unsigned char *data, size_t len) {
+    static const char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t needed = 4U * ((len + 2U) / 3U);
+    if (!out || out_size < needed + 1U) return 0;
+
+    size_t i = 0, o = 0;
+    while (i + 3U <= len) {
+        unsigned a = data[i++], b = data[i++], c = data[i++];
+        out[o++] = table[(a >> 2) & 0x3F];
+        out[o++] = table[((a & 3U) << 4) | ((b >> 4) & 0x0F)];
+        out[o++] = table[((b & 0x0F) << 2) | ((c >> 6) & 3U)];
+        out[o++] = table[c & 0x3F];
+    }
+    size_t rem = len - i;
+    if (rem == 1U) {
+        unsigned a = data[i];
+        out[o++] = table[(a >> 2) & 0x3F];
+        out[o++] = table[(a & 3U) << 4];
+        out[o++] = '='; out[o++] = '=';
+    } else if (rem == 2U) {
+        unsigned a = data[i], b = data[i + 1U];
+        out[o++] = table[(a >> 2) & 0x3F];
+        out[o++] = table[((a & 3U) << 4) | ((b >> 4) & 0x0F)];
+        out[o++] = table[(b & 0x0F) << 2];
+        out[o++] = '=';
+    }
+    out[o] = '\0';
+    return o;
+}
+
+static void screenshot_transport_pause(void) {
+    /* badgevms_launcher is built as a VMS app against sdk_staging and does
+       not have direct FreeRTOS headers/API available.  stdout is already
+       flushed after every transport record; keep this dependency-free. */
+}
+
+static bool screenshot_send_parity(screenshot_stream_t *stream) {
+    if (!stream || stream->parity_count == 0) return true;
+    char encoded[(IMG_RAW_CHUNK * 4 / 3) + 8];
+    if (!screenshot_base64_encode(encoded, sizeof(encoded), stream->parity, IMG_RAW_CHUNK)) {
+        printf("IMG ERROR parity-base64-buffer\n"); fflush(stdout); return false;
+    }
+    unsigned crc = screenshot_crc32(stream->parity, IMG_RAW_CHUNK);
+    printf("IMG P %06u %08X %s\n", stream->parity_group, crc, encoded);
+    fflush(stdout); screenshot_transport_pause();
+    memset(stream->parity, 0, sizeof(stream->parity));
+    stream->parity_count = 0;
+    stream->parity_group++;
+    return true;
+}
+
+static bool screenshot_stream_flush(screenshot_stream_t *stream) {
+    if (!stream || stream->used == 0) return true;
+    char encoded[(IMG_RAW_CHUNK * 4 / 3) + 8];
+    if (!screenshot_base64_encode(encoded, sizeof(encoded), stream->raw, stream->used)) {
+        printf("IMG ERROR data-base64-buffer\n"); fflush(stdout); stream->used = 0; return false;
+    }
+    unsigned chunk_crc = screenshot_crc32(stream->raw, stream->used);
+    printf("IMG D %06u %02u %08X %s\n", stream->sequence,
+           (unsigned)stream->used, chunk_crc, encoded);
+    fflush(stdout); screenshot_transport_pause();
+    for (size_t i = 0; i < stream->used; i++) stream->parity[i] ^= stream->raw[i];
+    stream->sequence++;
+    stream->parity_count++;
+    stream->used = 0;
+    if (stream->parity_count == IMG_FEC_GROUP) return screenshot_send_parity(stream);
+    return true;
+}
+
+static bool screenshot_stream_bytes(screenshot_stream_t *stream,
+                                    const unsigned char *data, size_t len) {
+    if (!stream || !data) return false;
+    stream->crc = screenshot_crc32_update(stream->crc, data, len);
+    stream->compressed_bytes += (unsigned long)len;
+    while (len > 0) {
+        size_t room = IMG_RAW_CHUNK - stream->used;
+        size_t take = len < room ? len : room;
+        memcpy(stream->raw + stream->used, data, take);
+        stream->used += take; data += take; len -= take;
+        if (stream->used == IMG_RAW_CHUNK && !screenshot_stream_flush(stream)) return false;
+    }
+    return true;
+}
+
+static bool screenshot_emit_run(screenshot_stream_t *stream, unsigned count,
+                                unsigned char r, unsigned char g, unsigned char b) {
+    unsigned char record[5] = {
+        (unsigned char)(count & 0xFFU),
+        (unsigned char)((count >> 8) & 0xFFU), r, g, b
+    };
+    return screenshot_stream_bytes(stream, record, sizeof(record));
+}
+
+static bool screenshot_stream_framebuffer(const uint16_t *pixels) {
+    if (!pixels) {
+        printf("IMG ERROR no-framebuffer\n"); fflush(stdout); return false;
+    }
+
+    screenshot_stream_t stream;
+    memset(&stream, 0, sizeof(stream));
+    stream.crc = 0xFFFFFFFFU;
+    printf("IMG BEGIN %d %d RGB24 RLE5FEC1 %d %d\n",
+           SCREEN_WIDTH, SCREEN_HEIGHT, IMG_RAW_CHUNK, IMG_FEC_GROUP);
+    fflush(stdout); screenshot_transport_pause();
+
+    bool have_run = false;
+    unsigned run_count = 0;
+    unsigned char run_r = 0, run_g = 0, run_b = 0;
+    const size_t count = (size_t)SCREEN_WIDTH * (size_t)SCREEN_HEIGHT;
+
+    for (size_t i = 0; i < count; i++) {
+        uint16_t p = pixels[i];
+        unsigned r5 = (p >> 11) & 0x1FU;
+        unsigned g6 = (p >> 5)  & 0x3FU;
+        unsigned b5 = p & 0x1FU;
+        unsigned char r = (unsigned char)((r5 << 3) | (r5 >> 2));
+        unsigned char g = (unsigned char)((g6 << 2) | (g6 >> 4));
+        unsigned char b = (unsigned char)((b5 << 3) | (b5 >> 2));
+
+        if (have_run && r == run_r && g == run_g && b == run_b && run_count < 65535U) {
+            run_count++;
+            continue;
+        }
+        if (have_run && !screenshot_emit_run(&stream, run_count, run_r, run_g, run_b)) return false;
+        have_run = true; run_count = 1; run_r = r; run_g = g; run_b = b;
+    }
+    if (have_run && !screenshot_emit_run(&stream, run_count, run_r, run_g, run_b)) return false;
+    if (!screenshot_stream_flush(&stream)) return false;
+    if (!screenshot_send_parity(&stream)) return false;
+
+    unsigned final_crc = stream.crc ^ 0xFFFFFFFFU;
+    for (int repeat = 0; repeat < 2; repeat++) {
+        printf("IMG END %lu %08X %u\n", stream.compressed_bytes, final_crc, stream.sequence);
+        fflush(stdout); screenshot_transport_pause();
+    }
+    return true;
+}
+
+/* ===========================================================
    Input handling
    =========================================================== */
 static void handle_keyboard(Launcher_Context *ctx, keyboard_scancode_t code) {
@@ -522,6 +761,11 @@ static void handle_keyboard(Launcher_Context *ctx, keyboard_scancode_t code) {
         case KEY_SCANCODE_A:
             ctx->about_index = ctx->selected_item;
             ctx->show_about  = true;
+            break;
+
+        case KEY_SCANCODE_S:
+            /* WHY+S on the badge arrives here as the S scancode. */
+            ctx->screenshot_pending = true;
             break;
 
         case KEY_SCANCODE_ESCAPE:
@@ -595,6 +839,13 @@ static bool run_launcher(application_t **apps, size_t num) {
                 a = ctx.applications[ctx.about_index];
             }
             draw_about(&ctx, a);
+        }
+
+        if (ctx.screenshot_pending) {
+            ctx.screenshot_pending = false;
+            printf("[launcher] screenshot: 720x720 visible framebuffer\n");
+            fflush(stdout);
+            screenshot_stream_framebuffer(ctx.pixels);
         }
 
         window_present(ctx.window, true, NULL, 0);

@@ -2711,48 +2711,101 @@ static void draw_text(SDL_Renderer *r, int x, int y, const char *s, int max_w) {
 
 
 
-/* ---------- logo (cyan square + yellow magnifying glass) ---------- */
-static void draw_filled_circle_i(SDL_Renderer *r, int cx, int cy, int R) {
-    int x = 0, y = R;
-    int d = 1 - R;
-    while (y >= x) {
-        int x0 = cx - x, x1 = cx + x;
-        int y0 = cy - y, y1 = cy + y;
-        int y0r = cy - x, y1r = cy + x;
+/* ---------- Mini Browser logo (tiny globe + orbit) ---------- */
+static void logo_point(SDL_Renderer *r, int x, int y) {
+    SDL_RenderPoint(r, (float)x, (float)y);
+}
 
-        SDL_FRect s1 = { (float)x0, (float)y0, (float)(x1 - x0 + 1), 1.0f };
-        SDL_FRect s2 = { (float)x0, (float)y1, (float)(x1 - x0 + 1), 1.0f };
-        SDL_FRect s3 = { (float)(cx - y), (float)y0r, (float)(2*y + 1), 1.0f };
-        SDL_FRect s4 = { (float)(cx - y), (float)y1r, (float)(2*y + 1), 1.0f };
-        SDL_RenderFillRect(r, &s1);
-        SDL_RenderFillRect(r, &s2);
-        SDL_RenderFillRect(r, &s3);
-        SDL_RenderFillRect(r, &s4);
+static void logo_line(SDL_Renderer *r, int x0, int y0, int x1, int y1) {
+    SDL_RenderLine(r, (float)x0, (float)y0, (float)x1, (float)y1);
+}
 
-        x++;
-        if (d < 0) d += 2*x + 1;
-        else { y--; d += 2*(x - y) + 1; }
+static void logo_circle(SDL_Renderer *r, int cx, int cy, int radius) {
+    int x = radius;
+    int y = 0;
+    int err = 1 - x;
+
+    while (x >= y) {
+        logo_point(r, cx + x, cy + y);
+        logo_point(r, cx + y, cy + x);
+        logo_point(r, cx - y, cy + x);
+        logo_point(r, cx - x, cy + y);
+        logo_point(r, cx - x, cy - y);
+        logo_point(r, cx - y, cy - x);
+        logo_point(r, cx + y, cy - x);
+        logo_point(r, cx + x, cy - y);
+
+        y++;
+        if (err < 0) {
+            err += 2 * y + 1;
+        } else {
+            x--;
+            err += 2 * (y - x) + 1;
+        }
     }
 }
+
 static void draw_logo(SDL_Renderer *r) {
     if (!r) return;
-    /* Cyan square background at (ICON_LEFT, ICON_TOP), ICON_SIZE x ICON_SIZE */
-    SDL_SetRenderDrawColor(r, 0, 180, 180, 255);
-    SDL_FRect bg = { (float)ICON_LEFT, (float)ICON_TOP, (float)ICON_SIZE, (float)ICON_SIZE };
+
+    /*
+     * 20x20 approximation of the Mini Browser logo:
+     * cyan/blue globe, purple/magenta orbit and a small magenta planet.
+     * It is drawn directly with SDL primitives: no image decoder, file I/O,
+     * heap allocation or extra framebuffer is needed.
+     */
+    const int left = ICON_LEFT;
+    const int top  = ICON_TOP;
+    const int cx   = left + 9;
+    const int cy   = top + 10;
+
+    /* Dark tile: visually merges into the browser title bar. */
+    SDL_SetRenderDrawColor(r, 8, 10, 12, 255);
+    SDL_FRect bg = { (float)left, (float)top,
+                     (float)ICON_SIZE, (float)ICON_SIZE };
     SDL_RenderFillRect(r, &bg);
 
-    /* Yellow magnifying glass: circle + short handle */
-    int cx = ICON_LEFT + ICON_SIZE/2;   /* center within square */
-    int cy = ICON_TOP  + ICON_SIZE/2;
-    int R  = 6;
+    /* Cyan/blue globe outline. */
+    SDL_SetRenderDrawColor(r, 0, 220, 255, 255);
+    logo_circle(r, cx, cy, 7);
 
-    SDL_SetRenderDrawColor(r, 255, 255, 0, 255);   /* yellow circle */
-    draw_filled_circle_i(r, cx, cy, R);
+    /* Globe latitude lines. */
+    logo_line(r, cx - 6, cy - 3, cx + 6, cy - 3);
+    logo_line(r, cx - 7, cy,     cx + 7, cy);
+    logo_line(r, cx - 6, cy + 3, cx + 6, cy + 3);
 
-    /* 2px thick handle going down-right */
-    SDL_SetRenderDrawColor(r, 255, 255, 0, 255);   /* yellow handle */
-    SDL_FRect handle = { (float)(cx + R - 1), (float)(cy + R - 1), 6.0f, 2.0f };
-    SDL_RenderFillRect(r, &handle);
+    /* Globe longitude curves, approximated at this tiny resolution. */
+    logo_line(r, cx,     cy - 7, cx,     cy + 7);
+    logo_line(r, cx - 2, cy - 6, cx - 4, cy);
+    logo_line(r, cx - 4, cy,     cx - 2, cy + 6);
+    logo_line(r, cx + 2, cy - 6, cx + 4, cy);
+    logo_line(r, cx + 4, cy,     cx + 2, cy + 6);
+
+    /* Blue highlight on the lower-left edge. */
+    SDL_SetRenderDrawColor(r, 0, 120, 255, 255);
+    logo_line(r, cx - 6, cy + 4, cx - 3, cy + 7);
+    logo_line(r, cx - 3, cy + 7, cx + 2, cy + 7);
+
+    /* Purple/magenta orbital ring crossing the globe. */
+    SDL_SetRenderDrawColor(r, 150, 35, 255, 255);
+    logo_line(r, left + 1,  top + 14, left + 5,  top + 11);
+    logo_line(r, left + 5,  top + 11, left + 11, top + 9);
+    logo_line(r, left + 11, top + 9,  left + 16, top + 6);
+    logo_line(r, left + 16, top + 6,  left + 18, top + 4);
+
+    /* Brighter cyan front part of the orbit at lower-left. */
+    SDL_SetRenderDrawColor(r, 0, 230, 255, 255);
+    logo_line(r, left,     top + 15, left + 4, top + 15);
+    logo_line(r, left + 4, top + 15, left + 8, top + 13);
+
+    /* Magenta planet at the end of the orbit. */
+    SDL_SetRenderDrawColor(r, 235, 35, 255, 255);
+    SDL_FRect planet = { (float)(left + 17), (float)(top + 2), 3.0f, 3.0f };
+    SDL_RenderFillRect(r, &planet);
+
+    /* Tiny bright highlight keeps the planet readable at 20x20. */
+    SDL_SetRenderDrawColor(r, 255, 150, 255, 255);
+    logo_point(r, left + 17, top + 2);
 }
 
 /* --- draw URL bar text, clipped from the LEFT, starting at URL_TEXT_X --- */
