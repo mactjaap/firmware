@@ -9,6 +9,7 @@ latest **Mini Browser 2.5** with extended Unicode support.
 
 ![BadgeVMS Logo](misc/BadgeVMS.png)
 
+
 ## What is different in this build?
 
 The goal of this fork is to provide a polished, useful everyday BadgeVMS
@@ -32,6 +33,14 @@ Changes include:
 -   Updated About/information presentation and launcher navigation.
 
 ![Badge menu screenshot](badge_launcher.png)
+
+Make your own screenshot.
+
+``` 
+# example on macOS
+./badge_screenshot.py /dev/cu.wchusbserial10
+```
+Then press **WHY+S** while the launcher is visible.
 
 ### Mini Browser 2.5
 
