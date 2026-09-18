@@ -23,7 +23,7 @@
 #endif
 
 /* ---------- Mini Browser version ---------- */
-#define MINI_BROWSER_VERSION "2.5"
+#define MINI_BROWSER_VERSION "2.6"
 
 /* ---------- Limits & layout ---------- */
 #define MAX_BYTES     (64 * 1024)
@@ -227,6 +227,7 @@ typedef struct {
     char title[128];            /* page <title> */
     form_t forms[MAX_FORMS];
     int form_count;
+    int explicit_color_count;  /* 2.6 Phase 1B valid HTML/CSS foreground colors */
 } page_t;
 
 /* ---------- URL helpers ---------- */
@@ -575,6 +576,105 @@ static void append_line_break(char *out, size_t cap, size_t *used) {
     if (*used && out[*used - 1] != '\n') append_text(out, cap, used, "\n");
 }
 
+#define TEXT_BOLD_ON     0x01
+#define TEXT_BOLD_OFF    0x02
+#define TEXT_LINK_ON     0x03
+#define TEXT_LINK_OFF    0x04
+#define TEXT_HEADING_ON  0x05
+#define TEXT_HEADING_OFF 0x06
+#define TEXT_HRULE       0x07
+#define TEXT_FORM_ON     0x08
+#define TEXT_FORM_OFF    0x09
+
+/* 2.6 Phase 1B: zero-width RGB color markers encoded as fixed PUA nibbles.
+ * A color push is START + six nibble codepoints (RRGGBB). This avoids using
+ * arbitrary PUA codepoints as byte values and keeps the marker stream fully
+ * deterministic through wrapping/debugging. */
+#define TEXT_COLOR_START   0xE400u
+#define TEXT_COLOR_NIBBLE  0xE410u  /* E410..E41F = hexadecimal nibble 0..15 */
+#define TEXT_COLOR_POP     0xE420u
+#define TEXT_COLOR_INHERIT 0xE421u
+
+static int append_utf8_cp(char *out, size_t cap, size_t *used, unsigned cp) {
+    char b[4]; size_t n = 0;
+    if (cp <= 0x7F) b[n++] = (char)cp;
+    else if (cp <= 0x7FF) { b[n++] = (char)(0xC0 | (cp >> 6)); b[n++] = (char)(0x80 | (cp & 0x3F)); }
+    else { b[n++] = (char)(0xE0 | (cp >> 12)); b[n++] = (char)(0x80 | ((cp >> 6) & 0x3F)); b[n++] = (char)(0x80 | (cp & 0x3F)); }
+    return append_bytes(out, cap, used, b, n);
+}
+
+static int parse_html_color(const char *value, unsigned char *rr, unsigned char *gg, unsigned char *bb) {
+    if (!value || !rr || !gg || !bb) return 0;
+    while (isspace((unsigned char)*value)) value++;
+    char v[32]; size_t n = 0;
+    while (*value && *value != ';' && !isspace((unsigned char)*value) && n + 1 < sizeof(v))
+        v[n++] = (char)tolower((unsigned char)*value++);
+    v[n] = 0;
+    if (v[0] == '#') {
+        unsigned x = 0;
+        if (strlen(v) == 7 && sscanf(v + 1, "%06x", &x) == 1) {
+            *rr = (unsigned char)(x >> 16); *gg = (unsigned char)(x >> 8); *bb = (unsigned char)x; return 1;
+        }
+        if (strlen(v) == 4) {
+            unsigned r,g,b;
+            if (sscanf(v + 1, "%1x%1x%1x", &r, &g, &b) == 3) {
+                *rr=(unsigned char)(r*17); *gg=(unsigned char)(g*17); *bb=(unsigned char)(b*17); return 1;
+            }
+        }
+        return 0;
+    }
+    struct named_color { const char *name; unsigned char r,g,b; };
+    static const struct named_color colors[] = {
+        {"black",0,0,0},{"white",255,255,255},{"red",255,0,0},{"green",0,128,0},
+        {"blue",0,0,255},{"yellow",255,255,0},{"cyan",0,255,255},{"aqua",0,255,255},
+        {"magenta",255,0,255},{"fuchsia",255,0,255},{"gray",128,128,128},{"grey",128,128,128},
+        {"orange",255,165,0},{"purple",128,0,128}
+    };
+    for (size_t i=0;i<sizeof(colors)/sizeof(colors[0]);i++) if (!strcmp(v, colors[i].name)) {
+        *rr=colors[i].r; *gg=colors[i].g; *bb=colors[i].b; return 1;
+    }
+    return 0;
+}
+
+static int style_color_value(const char *style, unsigned char *r, unsigned char *g, unsigned char *b) {
+    if (!style) return 0;
+    const char *p = style;
+    while (*p) {
+        while (*p == ';' || isspace((unsigned char)*p)) p++;
+        const char *name = p;
+        while (*p && *p != ':' && *p != ';') p++;
+        if (*p != ':') { while (*p && *p != ';') p++; continue; }
+        const char *name_end = p++;
+        while (name_end > name && isspace((unsigned char)name_end[-1])) name_end--;
+        while (name < name_end && isspace((unsigned char)*name)) name++;
+        const char *val = p;
+        while (*p && *p != ';') p++;
+        if ((size_t)(name_end-name)==5 && !strncasecmp(name,"color",5)) {
+            char tmp[32]; size_t n=(size_t)(p-val); while(n && isspace((unsigned char)val[n-1])) n--;
+            while(n && isspace((unsigned char)*val)){val++;n--;}
+            if(n>=sizeof(tmp)) n=sizeof(tmp)-1; memcpy(tmp,val,n); tmp[n]=0;
+            return parse_html_color(tmp,r,g,b);
+        }
+    }
+    return 0;
+}
+
+static int color_container_tag(const char *tag) {
+    static const char *tags[] = {"font","span","p","div","section","article","main","header","footer","nav","aside","blockquote","address","code","strong","b","em","i","a","h1","h2","h3","h4","h5","h6","td","th"};
+    for (size_t i=0;i<sizeof(tags)/sizeof(tags[0]);i++) if (!strcmp(tag,tags[i])) return 1;
+    return 0;
+}
+
+static void append_color_push(char *out, size_t cap, size_t *used, unsigned char r, unsigned char g, unsigned char b) {
+    append_utf8_cp(out, cap, used, TEXT_COLOR_START);
+    append_utf8_cp(out, cap, used, TEXT_COLOR_NIBBLE + ((r >> 4) & 0x0F));
+    append_utf8_cp(out, cap, used, TEXT_COLOR_NIBBLE + (r & 0x0F));
+    append_utf8_cp(out, cap, used, TEXT_COLOR_NIBBLE + ((g >> 4) & 0x0F));
+    append_utf8_cp(out, cap, used, TEXT_COLOR_NIBBLE + (g & 0x0F));
+    append_utf8_cp(out, cap, used, TEXT_COLOR_NIBBLE + ((b >> 4) & 0x0F));
+    append_utf8_cp(out, cap, used, TEXT_COLOR_NIBBLE + (b & 0x0F));
+}
+
 static int append_action_marker(char *out, size_t cap, size_t *used, int action_index) {
     char marker[8];
     int n = snprintf(marker, sizeof(marker), "\001%03d\002", action_index);
@@ -615,16 +715,17 @@ static int refresh_page_text(page_t *page) {
                     const form_t *form = &page->forms[action->form_index];
                     if (action->field_index >= 0 && action->field_index < form->field_count) {
                         const form_field_t *field = &form->fields[action->field_index];
-                        snprintf(line, sizeof(line), "[%d] %s: %s\n",
-                                 action_index + 1, field->name, field->value);
+                        snprintf(line, sizeof(line), "%c[%d] %s: %s%c\n",
+                                 TEXT_FORM_ON, action_index + 1, field->name, field->value, TEXT_FORM_OFF);
                     }
                 } else if (action->type == ACTION_FORM_SUBMIT &&
                            action->form_index >= 0 && action->form_index < page->form_count) {
                     const form_t *form = &page->forms[action->form_index];
                     if (action->field_index >= 0 && action->field_index < form->field_count) {
                         const form_field_t *field = &form->fields[action->field_index];
-                        snprintf(line, sizeof(line), "[%d] [%s]\n",
-                                 action_index + 1, field->label[0] ? field->label : "Submit");
+                        snprintf(line, sizeof(line), "%c[%d] [%s]%c\n",
+                                 TEXT_FORM_ON, action_index + 1,
+                                 field->label[0] ? field->label : "Submit", TEXT_FORM_OFF);
                     }
                 }
                 if (!append_text(rendered, cap, &used, line)) { free(rendered); return 0; }
@@ -693,8 +794,7 @@ static void extract_button_label(const char *start, const char *end, char *out, 
  * Must be defined before html_to_page(), because the HTML parser emits them.
  * They are preserved by wrap_text() and consumed by draw_text().
  */
-#define TEXT_BOLD_ON  0x01
-#define TEXT_BOLD_OFF 0x02
+
 
 static page_t *html_to_page(const char *html, const char *base_url) {
     if (!html) return NULL;
@@ -750,7 +850,12 @@ static page_t *html_to_page(const char *html, const char *base_url) {
         if (p < html_end && *p == '/') { closing = true; p++; }
         while (p < html_end && isspace((unsigned char)*p)) p++;
         char tag[16]; size_t tag_len = 0;
-        while (p < html_end && tag_len + 1 < sizeof(tag) && isalpha((unsigned char)*p))
+        /* HTML tag names may contain digits after the initial letter.
+         * This matters for h1..h6: the old isalpha-only loop parsed <h2>
+         * as tag "h", leaving "2" at the start of the attribute range.
+         * As a result headings were neither recognized as headings nor as
+         * color containers, so style="color:yellow" was never seen. */
+        while (p < html_end && tag_len + 1 < sizeof(tag) && isalnum((unsigned char)*p))
             tag[tag_len++] = (char)tolower((unsigned char)*p++);
         tag[tag_len] = 0;
         const char *attributes = p;
@@ -771,16 +876,55 @@ static page_t *html_to_page(const char *html, const char *base_url) {
                 append_text(template_text, template_cap, &used, marker);
             }
             else if (!strcmp(tag, "em") || !strcmp(tag, "i")) append_text(template_text, template_cap, &used, "_");
+            else if (!strcmp(tag, "a")) {
+                char marker[2] = { TEXT_LINK_OFF, 0 };
+                append_text(template_text, template_cap, &used, marker);
+            }
+            else if (!strcmp(tag, "h1") || !strcmp(tag, "h2") || !strcmp(tag, "h3") ||
+                     !strcmp(tag, "h4") || !strcmp(tag, "h5") || !strcmp(tag, "h6")) {
+                char marker[2] = { TEXT_HEADING_OFF, 0 };
+                append_text(template_text, template_cap, &used, marker);
+                append_line_break(template_text, template_cap, &used);
+            }
             else if (!strcmp(tag, "p") || !strcmp(tag, "div") || !strcmp(tag, "section") ||
                      !strcmp(tag, "article") || !strcmp(tag, "main") || !strcmp(tag, "header") ||
                      !strcmp(tag, "footer") || !strcmp(tag, "nav") || !strcmp(tag, "aside") ||
                      !strcmp(tag, "blockquote") || !strcmp(tag, "address") || !strcmp(tag, "li") ||
-                     !strcmp(tag, "h1") || !strcmp(tag, "h2") || !strcmp(tag, "h3") ||
-                     !strcmp(tag, "h4") || !strcmp(tag, "h5") || !strcmp(tag, "h6") ||
                      !strcmp(tag, "tr") || !strcmp(tag, "table"))
                 append_line_break(template_text, template_cap, &used);
+            if (color_container_tag(tag)) append_utf8_cp(template_text, template_cap, &used, TEXT_COLOR_POP);
             cursor = after_tag;
             continue;
+        }
+
+        /* Block elements must break the line BEFORE their color marker is emitted.
+         * Otherwise wrap_text() can leave the marker on the preceding line, causing
+         * the block's requested color to be lost. Inline elements do not pre-break. */
+        bool color_block_tag =
+            !strcmp(tag, "p") || !strcmp(tag, "div") || !strcmp(tag, "section") ||
+            !strcmp(tag, "article") || !strcmp(tag, "main") || !strcmp(tag, "header") ||
+            !strcmp(tag, "footer") || !strcmp(tag, "nav") || !strcmp(tag, "aside") ||
+            !strcmp(tag, "blockquote") || !strcmp(tag, "address") ||
+            !strcmp(tag, "h1") || !strcmp(tag, "h2") || !strcmp(tag, "h3") ||
+            !strcmp(tag, "h4") || !strcmp(tag, "h5") || !strcmp(tag, "h6") ||
+            !strcmp(tag, "tr");
+        if (color_block_tag)
+            append_line_break(template_text, template_cap, &used);
+
+        /* Phase 1B: every supported paired text container pushes a color state.
+         * Uncolored containers push inheritance, so nested closing tags restore correctly. */
+        if (color_container_tag(tag)) {
+            unsigned char cr=0,cg=0,cb=0; int have_color=0;
+            char style_value[192] = "";
+            if (tag_attribute(attributes, tag_end, "style", style_value, sizeof(style_value)))
+                have_color = style_color_value(style_value, &cr, &cg, &cb);
+            if (!have_color && !strcmp(tag,"font")) {
+                char color_value[32] = "";
+                if (tag_attribute(attributes, tag_end, "color", color_value, sizeof(color_value)))
+                    have_color = parse_html_color(color_value, &cr, &cg, &cb);
+            }
+            if (have_color) { append_color_push(template_text, template_cap, &used, cr,cg,cb); page->explicit_color_count++; }
+            else append_utf8_cp(template_text, template_cap, &used, TEXT_COLOR_INHERIT);
         }
 
         if (!strcmp(tag, "head")) in_head = true;
@@ -791,11 +935,13 @@ static page_t *html_to_page(const char *html, const char *base_url) {
         else if (!strcmp(tag, "p") || !strcmp(tag, "div") || !strcmp(tag, "section") ||
                  !strcmp(tag, "article") || !strcmp(tag, "main") || !strcmp(tag, "header") ||
                  !strcmp(tag, "footer") || !strcmp(tag, "nav") || !strcmp(tag, "aside") ||
-                 !strcmp(tag, "blockquote") || !strcmp(tag, "address") || !strcmp(tag, "tr"))
-            append_line_break(template_text, template_cap, &used);
+                 !strcmp(tag, "blockquote") || !strcmp(tag, "address") || !strcmp(tag, "tr")) {
+            /* line break already emitted before the Phase 1B color marker */
+        }
         else if (!strcmp(tag, "h1") || !strcmp(tag, "h2") || !strcmp(tag, "h3") ||
                  !strcmp(tag, "h4") || !strcmp(tag, "h5") || !strcmp(tag, "h6")) {
-            append_line_break(template_text, template_cap, &used);
+            char marker[2] = { TEXT_HEADING_ON, 0 };
+            append_text(template_text, template_cap, &used, marker);
             append_text(template_text, template_cap, &used, "= ");
         } else if (!strcmp(tag, "ul")) {
             ordered_depth = 0;
@@ -817,7 +963,8 @@ static page_t *html_to_page(const char *html, const char *base_url) {
         else if (!strcmp(tag, "em") || !strcmp(tag, "i")) append_text(template_text, template_cap, &used, "_");
         else if (!strcmp(tag, "hr")) {
             append_line_break(template_text, template_cap, &used);
-            append_text(template_text, template_cap, &used, "--------------------------------\n");
+            char marker[3] = { TEXT_HRULE, '\n', 0 };
+            append_text(template_text, template_cap, &used, marker);
         } else if (!strcmp(tag, "td") || !strcmp(tag, "th")) {
             if (used && template_text[used - 1] != '\n' && template_text[used - 1] != ' ')
                 append_text(template_text, template_cap, &used, " | ");
@@ -905,7 +1052,9 @@ static page_t *html_to_page(const char *html, const char *base_url) {
                     page->links[link_index].href[URL_MAX - 1] = 0;
                     int action = add_action(page, ACTION_LINK, link_index, -1, -1);
                     if (action >= 0) {
+                        char marker[2] = { TEXT_LINK_ON, 0 };
                         char number[16];
+                        append_text(template_text, template_cap, &used, marker);
                         snprintf(number, sizeof(number), "[%d]", action + 1);
                         append_text(template_text, template_cap, &used, number);
                     }
@@ -1201,7 +1350,13 @@ static unsigned utf8_next(const char *s, size_t len, size_t *i);
 
 
 static int wrap_glyph_width(unsigned cp) {
-    if (cp == TEXT_BOLD_ON || cp == TEXT_BOLD_OFF)
+    if (cp == TEXT_BOLD_ON || cp == TEXT_BOLD_OFF ||
+        cp == TEXT_LINK_ON || cp == TEXT_LINK_OFF ||
+        cp == TEXT_HEADING_ON || cp == TEXT_HEADING_OFF ||
+        cp == TEXT_HRULE || cp == TEXT_FORM_ON || cp == TEXT_FORM_OFF ||
+        cp == TEXT_COLOR_START ||
+        (cp >= TEXT_COLOR_NIBBLE && cp <= TEXT_COLOR_NIBBLE + 15) ||
+        cp == TEXT_COLOR_POP || cp == TEXT_COLOR_INHERIT)
         return 0;
 
     if (cp >= 32 && cp <= 126)
@@ -2368,13 +2523,38 @@ static void draw_unicode_char(SDL_Renderer *r, int x, int y, unsigned cp) {
 typedef struct {
     unsigned cp;
     bool bold;
+    bool underline;
+    unsigned char color;
+    bool custom_color;
+    unsigned char r, g, b;
     unsigned char dir;
 } visual_glyph_t;
+
+#define TEXT_COLOR_NORMAL  0
+#define TEXT_COLOR_LINK    1
+#define TEXT_COLOR_HEADING 2
+#define TEXT_COLOR_FORM    3
 
 #define BIDI_LINE_MAX 256
 #define DIR_NEUTRAL 0
 #define DIR_LTR     1
 #define DIR_RTL     2
+
+/*
+ * Renderer scratch storage.
+ *
+ * BadgeVMS gives the app task a bounded stack.  These buffers used to be
+ * automatic arrays in draw_text(), arabic_shape_line() and
+ * bidi_visualize_line().  Those functions are nested, so their worst-case
+ * stack usage accumulated and could trip the task's stack protector on
+ * Unicode/Arabic pages.
+ *
+ * Rendering is single-threaded in Mini Browser, so one bounded static scratch
+ * set is sufficient and preserves the existing algorithms without heap use.
+ */
+static visual_glyph_t g_render_line[BIDI_LINE_MAX];
+static visual_glyph_t g_bidi_tmp[BIDI_LINE_MAX];
+static unsigned g_arabic_original[BIDI_LINE_MAX];
 
 typedef struct {
     uint32_t base;
@@ -2447,7 +2627,7 @@ static bool arabic_transparent(unsigned cp) {
 }
 
 static void arabic_shape_line(visual_glyph_t *g, int count) {
-    unsigned original[BIDI_LINE_MAX];
+    unsigned *original = g_arabic_original;
 
     for (int i = 0; i < count; i++)
         original[i] = g[i].cp;
@@ -2570,7 +2750,7 @@ static int bidi_visualize_line(visual_glyph_t *g, int count, bool *base_rtl) {
         g[i].dir = (left != DIR_NEUTRAL && left == right) ? left : base;
     }
 
-    visual_glyph_t tmp[BIDI_LINE_MAX];
+    visual_glyph_t *tmp = g_bidi_tmp;
     int out = 0;
 
     if (base == DIR_LTR) {
@@ -2631,6 +2811,16 @@ static void draw_visual_line(SDL_Renderer *r, int x, int y,
 
     int cy = y;
 
+    /* A real <hr> is represented by one zero-width internal marker. */
+    for (int i = 0; i < count; i++) {
+        if (g[i].cp == TEXT_HRULE) {
+            SDL_SetRenderDrawColor(r, 70, 90, 100, 255);
+            SDL_RenderLine(r, (float)x, (float)(cy + CH_H / 2),
+                           (float)(x + max_w), (float)(cy + CH_H / 2));
+            return;
+        }
+    }
+
     for (int i = 0; i < count; i++) {
         unsigned cp = g[i].cp;
         if (cp == 0xA0)
@@ -2645,6 +2835,23 @@ static void draw_visual_line(SDL_Renderer *r, int x, int y,
             cy += (CH_H + LINE_SPACING);
         }
 
+        if (g[i].custom_color) {
+            SDL_SetRenderDrawColor(r, g[i].r, g[i].g, g[i].b, 255);
+        } else switch (g[i].color) {
+            case TEXT_COLOR_LINK:
+                SDL_SetRenderDrawColor(r, 0, 220, 255, 255);
+                break;
+            case TEXT_COLOR_HEADING:
+                SDL_SetRenderDrawColor(r, 185, 90, 255, 255);
+                break;
+            case TEXT_COLOR_FORM:
+                SDL_SetRenderDrawColor(r, 255, 205, 70, 255);
+                break;
+            default:
+                SDL_SetRenderDrawColor(r, 220, 220, 220, 255);
+                break;
+        }
+
         if (cp >= 32 && cp <= 126) {
             draw_char(r, cx, cy, (char)cp);
             if (g[i].bold)
@@ -2655,7 +2862,30 @@ static void draw_visual_line(SDL_Renderer *r, int x, int y,
                 draw_unicode_char(r, cx + 1, cy, cp);
         }
 
+        if (g[i].underline && cp != ' ') {
+            SDL_RenderLine(r, (float)cx, (float)(cy + CH_H + 1),
+                           (float)(cx + char_w - 2), (float)(cy + CH_H + 1));
+        }
+
         cx += char_w;
+    }
+}
+
+static void debug_print_content_clean(const char *s) {
+    if (!s) return;
+    size_t i = 0, len = strlen(s);
+    while (i < len) {
+        size_t start = i;
+        unsigned cp = utf8_next(s, len, &i);
+        if (cp == TEXT_BOLD_ON || cp == TEXT_BOLD_OFF ||
+            cp == TEXT_LINK_ON || cp == TEXT_LINK_OFF ||
+            cp == TEXT_HEADING_ON || cp == TEXT_HEADING_OFF ||
+            cp == TEXT_HRULE || cp == TEXT_FORM_ON || cp == TEXT_FORM_OFF ||
+            cp == TEXT_COLOR_START ||
+            (cp >= TEXT_COLOR_NIBBLE && cp <= TEXT_COLOR_NIBBLE + 15) ||
+            cp == TEXT_COLOR_POP || cp == TEXT_COLOR_INHERIT)
+            continue;
+        fwrite(s + start, 1, i - start, stdout);
     }
 }
 
@@ -2666,9 +2896,17 @@ static void draw_text(SDL_Renderer *r, int x, int y, const char *s, int max_w) {
     size_t L = strlen(s);
     int cy = y;
     int bold_depth = 0;
+    int link_depth = 0;
+    int heading_depth = 0;
+    int form_depth = 0;
+    struct { bool custom; unsigned char r,g,b; } color_stack[32];
+    int color_depth = 0;
+    bool custom_color = false; unsigned char custom_r=0, custom_g=0, custom_b=0;
+    int color_nibbles = -1;
+    unsigned color_value = 0;
 
     while (i <= L) {
-        visual_glyph_t line[BIDI_LINE_MAX];
+        visual_glyph_t *line = g_render_line;
         int count = 0;
         bool saw_newline = false;
 
@@ -2686,6 +2924,62 @@ static void draw_text(SDL_Renderer *r, int x, int y, const char *s, int max_w) {
                     bold_depth--;
                 continue;
             }
+            if (cp == TEXT_LINK_ON) { link_depth++; continue; }
+            if (cp == TEXT_LINK_OFF) { if (link_depth > 0) link_depth--; continue; }
+            if (cp == TEXT_HEADING_ON) { heading_depth++; continue; }
+            if (cp == TEXT_HEADING_OFF) { if (heading_depth > 0) heading_depth--; continue; }
+            if (cp == TEXT_FORM_ON) { form_depth++; continue; }
+            if (cp == TEXT_FORM_OFF) { if (form_depth > 0) form_depth--; continue; }
+            if (cp == TEXT_COLOR_START) {
+                color_nibbles = 0;
+                color_value = 0;
+                continue;
+            }
+            if (color_nibbles >= 0 &&
+                cp >= TEXT_COLOR_NIBBLE && cp <= TEXT_COLOR_NIBBLE + 15) {
+                color_value = (color_value << 4) | (unsigned)(cp - TEXT_COLOR_NIBBLE);
+                color_nibbles++;
+                if (color_nibbles == 6) {
+                    if (color_depth < 32) {
+                        color_stack[color_depth].custom = custom_color;
+                        color_stack[color_depth].r = custom_r;
+                        color_stack[color_depth].g = custom_g;
+                        color_stack[color_depth].b = custom_b;
+                        color_depth++;
+                    }
+                    custom_color = true;
+                    custom_r = (unsigned char)((color_value >> 16) & 0xFF);
+                    custom_g = (unsigned char)((color_value >> 8) & 0xFF);
+                    custom_b = (unsigned char)(color_value & 0xFF);
+                    color_nibbles = -1;
+                    color_value = 0;
+                }
+                continue;
+            }
+            if (cp == TEXT_COLOR_INHERIT) {
+                if (color_depth < 32) {
+                    color_stack[color_depth].custom = custom_color;
+                    color_stack[color_depth].r = custom_r;
+                    color_stack[color_depth].g = custom_g;
+                    color_stack[color_depth].b = custom_b;
+                    color_depth++;
+                }
+                color_nibbles = -1;
+                color_value = 0;
+                continue;
+            }
+            if (cp == TEXT_COLOR_POP) {
+                if (color_depth > 0) {
+                    color_depth--;
+                    custom_color = color_stack[color_depth].custom;
+                    custom_r = color_stack[color_depth].r;
+                    custom_g = color_stack[color_depth].g;
+                    custom_b = color_stack[color_depth].b;
+                }
+                color_nibbles = -1;
+                color_value = 0;
+                continue;
+            }
             if (cp == '\n') {
                 saw_newline = true;
                 break;
@@ -2693,7 +2987,13 @@ static void draw_text(SDL_Renderer *r, int x, int y, const char *s, int max_w) {
 
             if (count < BIDI_LINE_MAX) {
                 line[count].cp = cp;
-                line[count].bold = bold_depth > 0;
+                line[count].bold = bold_depth > 0 || heading_depth > 0;
+                line[count].underline = link_depth > 0;
+                line[count].color = heading_depth > 0 ? TEXT_COLOR_HEADING :
+                                    link_depth > 0 ? TEXT_COLOR_LINK :
+                                    form_depth > 0 ? TEXT_COLOR_FORM : TEXT_COLOR_NORMAL;
+                line[count].custom_color = custom_color;
+                line[count].r = custom_r; line[count].g = custom_g; line[count].b = custom_b;
                 line[count].dir = DIR_NEUTRAL;
                 count++;
             }
@@ -4099,12 +4399,14 @@ int main(void) {
                                    page->link_count,
                                    page->action_count,
                                    page->form_count);
+                            printf("[mini_browser] visual: explicit_colors=%d\n", page->explicit_color_count);
                             printf("[mini_browser] cookies: count=%d\n",
                                    cookie_count());
 
                             if (wrapped) {
-                                printf("\n--- CONTENT START ---\n%s\n--- CONTENT END ---\n",
-                                       wrapped);
+                                printf("\n--- CONTENT START ---\n");
+                                debug_print_content_clean(wrapped);
+                                printf("\n--- CONTENT END ---\n");
                             }
                         }
                     }
