@@ -120,13 +120,14 @@ IRAM_ATTR void draw_window_box(uint16_t *fb, window_t *window, bool foreground) 
         }
     }
 
-    // Title text
+// Title text
+// Only draw a title when the window explicitly provides one.
+// Do not invent "FOREGROUND" / "BACKGROUND" labels for untitled windows.
+if (window->title && window->title[0] != '\0') {
     char title[21];
-    if (window->title) {
-        strncpy(title, window->title, 20);
-    } else {
-        strncpy(title, foreground ? "FOREGROUND" : "BACKGROUND", 20);
-    }
+    strncpy(title, window->title, 20);
+    title[20] = '\0';
+
     int max_text = strlen(title);
     int text_width;
     int title_bar_width = total_width - 4; // Account for borders
@@ -146,7 +147,7 @@ IRAM_ATTR void draw_window_box(uint16_t *fb, window_t *window, bool foreground) 
     } else {
         draw_text_rotated(fb, title, text_x, text_y, window_colors.bg_titlebar_text);
     }
-
+}
     // Inner content border
     uint16_t border_color = foreground ? window_colors.fg_window_inner_border : window_colors.bg_window_inner_border;
     int      content_x    = x + BORDER_PX;
