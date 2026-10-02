@@ -92,7 +92,7 @@ static stbi_uc *mb_stbi_load_gif_first_frame_from_memory(
 #endif
 
 /* ---------- Mini Browser version ---------- */
-#define MINI_BROWSER_VERSION "3.0"
+#define MINI_BROWSER_VERSION "2.6"
 
 /* ---------- Limits & layout ---------- */
 #define MAX_BYTES     (64 * 1024)
@@ -614,63 +614,20 @@ static const char *emit_named_entity(const char *h, char *out, size_t *o, size_t
     if (!h || *h != '&') return NULL;
 
     const char *p = h + 1;
+    const char *semi = strchr(p, ';');
+    if (!semi) return NULL;
 
-    /*
-     * Prefer the normal semicolon-terminated form. Keep this bounded so a
-     * semicolon much later in ordinary page text cannot accidentally become
-     * part of an entity name.
-     */
-    const char *semi = NULL;
-    for (size_t n = 0; n <= 12 && p[n]; n++) {
-        if (p[n] == ';') {
-            semi = p + n;
-            break;
-        }
-        if (!(isalnum((unsigned char)p[n])))
-            break;
-    }
+    size_t name_len = (size_t)(semi - p);
+    if (!name_len || name_len > 12) return NULL;
 
-    if (semi) {
-        size_t name_len = (size_t)(semi - p);
-        if (!name_len || name_len > 12) return NULL;
-
-        for (size_t i = 0; i < sizeof(g_html_entities) / sizeof(g_html_entities[0]); i++) {
-            const char *name = g_html_entities[i].name;
-            if (strlen(name) == name_len && !strncmp(p, name, name_len)) {
-                if (!emit_utf8_codepoint(g_html_entities[i].codepoint, out, o, cap))
-                    return NULL;
-                return semi + 1;
-            }
-        }
-        return NULL;
-    }
-
-    /*
-     * Legacy HTML compatibility: old pages commonly omit the semicolon,
-     * for example "&copy 1995". Accept our known named entities only when
-     * the name is followed by a safe boundary. Do not turn prefixes such as
-     * "&copyright" into "&copy" + "right".
-     */
     for (size_t i = 0; i < sizeof(g_html_entities) / sizeof(g_html_entities[0]); i++) {
         const char *name = g_html_entities[i].name;
-        size_t name_len = strlen(name);
-
-        if (strncmp(p, name, name_len))
-            continue;
-
-        unsigned char next = (unsigned char)p[name_len];
-        if (next != 0 &&
-            !isspace(next) &&
-            next != '<' && next != '>' &&
-            next != '"' && next != '\'' &&
-            next != '&')
-            continue;
-
-        if (!emit_utf8_codepoint(g_html_entities[i].codepoint, out, o, cap))
-            return NULL;
-        return p + name_len;
+        if (strlen(name) == name_len && !strncmp(p, name, name_len)) {
+            if (!emit_utf8_codepoint(g_html_entities[i].codepoint, out, o, cap))
+                return NULL;
+            return semi + 1;
+        }
     }
-
     return NULL;
 }
 
@@ -1988,10 +1945,6 @@ static int wrap_token_width(const char *s, size_t start, size_t end) {
     return width;
 }
 
-/* Phase 3 GIF Test3: used by wrapping to preserve inline-image control
- * markers as standalone logical lines. Definition is in the image section. */
-static int is_image_marker_line(const char *line, int len, int *index);
-
 static char *wrap_text(const char *in, int max_cols) {
     if (!in) return NULL;
 
@@ -2089,29 +2042,6 @@ static char *wrap_text(const char *in, int max_cols) {
             }
         }
         pending_space = false;
-
-        /*
-         * Image markers are renderer control records, not ordinary text.
-         * Keep [[MBIMGn]] on a logical line by itself even when real-world
-         * HTML places an <img> directly after text without a block break.
-         * The renderer intentionally recognizes image markers only when the
-         * complete line is the marker.
-         */
-        int marker_index = -1;
-        if (is_image_marker_line(in + token_start,
-                                 (int)(token_end - token_start),
-                                 &marker_index)) {
-            if (line_px > 0)
-                out[o++] = '\n';
-
-            memcpy(out + o, in + token_start, token_end - token_start);
-            o += token_end - token_start;
-            out[o++] = '\n';
-            line_px = 0;
-            blank_run = 0;
-            i = token_end;
-            continue;
-        }
 
         /*
          * Emit the token UTF-8 codepoint by codepoint. Normally the whole
@@ -3011,50 +2941,17 @@ static int draw_decoded_image(SDL_Renderer *r, const page_image_t *spec,
     return draw_h;
 }
 
-/*
- * Phase 3 GIF Test4:
- * Accept [[MBIMGn]] when everything before and after it has zero rendered
- * width. Real-world HTML can leave invisible color/style/background state
- * markers around the image marker. debug_utf8() hides those state markers,
- * so CONTENT may look exactly like "[[MBIMG0]]" even though the old strict
- * byte-for-byte matcher rejected the line.
- */
-static int image_marker_side_is_zero_width(const char *s, size_t len) {
-    size_t i = 0;
-    while (i < len) {
-        unsigned cp = utf8_next(s, len, &i);
-        if (cp == 0) break;
-        if (cp == '\r' || cp == ' ' || cp == 0xA0) continue;
-        if (wrap_glyph_width(cp) != 0) return 0;
-    }
-    return 1;
-}
-
 static int is_image_marker_line(const char *line, int len, int *index) {
     if (!line || len < 10) return 0;
+    char tmp[32];
+    if (len >= (int)sizeof(tmp)) return 0;
+    memcpy(tmp, line, (size_t)len);
+    tmp[len] = 0;
 
-    static const char prefix[] = "[[MBIMG";
-    const size_t prefix_len = sizeof(prefix) - 1;
-    const char *end = line + len;
-
-    for (const char *p = line; p + prefix_len + 3 <= end; p++) {
-        if (memcmp(p, prefix, prefix_len) != 0) continue;
-
-        const char *q = p + prefix_len;
-        int n = 0, digits = 0;
-        while (q < end && *q >= '0' && *q <= '9') {
-            n = n * 10 + (*q - '0');
-            q++;
-            digits++;
-        }
-
-        if (digits == 0 || n < 0 || n >= MAX_INLINE_IMAGES) continue;
-        if (q + 2 > end || q[0] != ']' || q[1] != ']') continue;
-        q += 2;
-
-        if (!image_marker_side_is_zero_width(line, (size_t)(p - line))) continue;
-        if (!image_marker_side_is_zero_width(q, (size_t)(end - q))) continue;
-
+    int n = -1;
+    char extra = 0;
+    if (sscanf(tmp, "[[MBIMG%d]]%c", &n, &extra) == 1 &&
+        n >= 0 && n < MAX_INLINE_IMAGES) {
         if (index) *index = n;
         return 1;
     }
@@ -5486,7 +5383,7 @@ int main(void) {
         return 0;
     }
 
-    SDL_Window *win = SDL_CreateWindow("mini_browser", VIEW_W, VIEW_H, SDL_WINDOW_FULLSCREEN);
+    SDL_Window *win = SDL_CreateWindow("mini_browser", VIEW_W, VIEW_H, 0);
     if (!win) {
         printf("[mini_browser] CreateWindow failed: %s\n", SDL_GetError());
         SDL_Quit();
