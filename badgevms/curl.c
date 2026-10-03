@@ -508,6 +508,13 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
             break;
 
         case HTTP_EVENT_ON_HEADER:
+            /* Remember Content-Type for CURLINFO_CONTENT_TYPE. */
+            if (evt->header_key && evt->header_value &&
+                strcasecmp(evt->header_key, "Content-Type") == 0) {
+                dlfree(curl->content_type);
+                curl->content_type = why_strdup(evt->header_value);
+            }
+
             if (evt->header_key) {
                 if (strncasecmp(evt->header_key, "Set-Cookie", 10) == 0) {
                     if (evt->header_value) {
@@ -519,11 +526,14 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
                 }
             }
 
-            if (curl->header_function) {
+            if (curl->header_function && evt->header_key && evt->header_value) {
                 size_t key_len = strlen(evt->header_key);
                 size_t val_len = strlen(evt->header_value);
 
                 char *tmp_header = dlmalloc(key_len + val_len + 2);
+                if (!tmp_header) {
+                    break;
+                }
                 memcpy(tmp_header, evt->header_key, key_len);
                 tmp_header[key_len]     = ':';
                 tmp_header[key_len + 1] = ' ';
@@ -722,7 +732,14 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
         }
 
         case CURLOPT_FOLLOWLOCATION: {
-            long follow                        = va_arg(args, long);
+            long follow = va_arg(args, long);
+            /*
+             * esp_http_client treats max_redirection_count == 0 as "use the
+             * default (10)", so 0 alone never stopped redirects.  With
+             * FOLLOWLOCATION 0 the 3xx response (and its Location header) is
+             * returned to the caller, as in libcurl.
+             */
+            curl->config.disable_auto_redirect = !follow;
             curl->config.max_redirection_count = follow ? 10 : 0;
             break;
         }
@@ -934,6 +951,10 @@ CURLcode curl_easy_perform(CURL *curl_handle) {
     if (curl->post_data && curl->config.method == HTTP_METHOD_POST) {
         esp_http_client_set_post_field(curl->esp_client, curl->post_data, curl->post_data_size);
     }
+
+    /* Content-Type is per response; do not report the previous one. */
+    dlfree(curl->content_type);
+    curl->content_type = NULL;
 
     esp_err_t err = esp_http_client_perform(curl->esp_client);
 

@@ -55,6 +55,9 @@ static device_t     *keyboard_device;
 static window_t     *window_stack = NULL;
 static QueueHandle_t compositor_queue;
 
+// window->title is replaced by app tasks and read by the compositor task
+static portMUX_TYPE window_title_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static int        cur_fb = 0;
 static atomic_int cur_num_windows;
 static uint16_t  *framebuffers[DISPLAY_FRAMEBUFFERS];
@@ -575,12 +578,14 @@ static void IRAM_ATTR NOINLINE_ATTR compositor(void *ignored) {
                 ESP_LOGV(TAG, "Got scancode %02X mods %02X", c->keyboard.scancode, c->keyboard.mod);
                 if (c->keyboard.scancode == KEY_SCANCODE_TAB && c->keyboard.mod & BADGEVMS_KMOD_LALT &&
                     c->keyboard.down) {
-                    if (window_stack->next->title) {
+                    char next_title[21];
+                    window_title_copy(window_stack->next, next_title, sizeof(next_title));
+                    if (next_title[0]) {
                         ESP_LOGW(
                             TAG,
                             "ALT-TAB switching to window %p (%s)",
                             window_stack->next,
-                            window_stack->next->title
+                            next_title
                         );
                     } else {
                         ESP_LOGW(TAG, "ALT-TAB switching to window %p (no title)", window_stack->next);
@@ -975,13 +980,38 @@ char const *window_title_get(window_t *window) {
 
 void window_title_set(window_t *window, char const *title) {
     // window->title is either NULL or a string from strndup()
-    free(window->title);
+    char *new_title = NULL;
     if (title) {
-        window->title = strndup(title, 20);
-        if (!window->title) {
+        new_title = strndup(title, 20);
+        if (!new_title) {
+            // Keep the old title, window_create() relies on it staying NULL
             ESP_LOGW(TAG, "Unable to allocate window title");
+            return;
         }
     }
+
+    // Swap under the lock so the compositor never sees a freed title
+    taskENTER_CRITICAL(&window_title_mux);
+    char *old_title = window->title;
+    window->title   = new_title;
+    taskEXIT_CRITICAL(&window_title_mux);
+
+    free(old_title);
+}
+
+void window_title_copy(window_t *window, char *buf, size_t len) {
+    if (!len) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&window_title_mux);
+    if (window->title) {
+        strncpy(buf, window->title, len - 1);
+        buf[len - 1] = '\0';
+    } else {
+        buf[0] = '\0';
+    }
+    taskEXIT_CRITICAL(&window_title_mux);
 }
 
 window_coords_t window_position_get(window_t *window) {

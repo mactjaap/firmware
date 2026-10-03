@@ -8,11 +8,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <ctype.h>
 
 #include <badgevms/application.h>
 #include <badgevms/compositor.h>
 #include <badgevms/event.h>
 #include <badgevms/keyboard.h>
+#include <badgevms/process.h>
+
+/* printf/draw fallback for optional (possibly NULL) application strings */
+#define S(x) ((x) ? (x) : "(null)")
 
 
 /* ===========================================================
@@ -28,11 +33,7 @@
 #define COL_PANEL        0x111826  /* card back */
 
 /* WHY2025 Accent Colours (0xRRGGBB) */
-#define COL_ACCENT_1   0xFFFB96  /* yellow */
-#define COL_ACCENT_2   0x64EFFE  /* cyan */
 #define COL_ACCENT_3   0xF25E95  /* pink/rose */
-#define COL_ACCENT_4   0x5233BF  /* purple */
-#define COL_ACCENT_5   0x2E1A64  /* dark purple */
 #define COL_ACCENT_6   0xF24436  /* red */
 
 #define COL_TITLE_BG     0x0F1220
@@ -376,31 +377,74 @@ static void icon_hello(fbview_t *ctx, int x,int y,int sz,bool sel){
     draw_thick_line(ctx,cx,cy+r/3,cx+r/3,cy+r/4,0xF25E95,2);
 }
 
-/* UID->icon mapping */
+/* ===========================================================
+   Known applications: list order, visibility and icon
+   =========================================================== */
+typedef void (*icon_fn_t)(fbview_t *ctx, int x, int y, int sz, bool sel);
+
+typedef struct {
+    const char *uid;     /* exact unique_identifier */
+    int         rank;    /* lower sorts first; equal ranks sort by name */
+    bool        hidden;  /* never shown in the launcher list */
+    icon_fn_t   icon;
+} app_info_t;
+
+#define RANK_DEFAULT 1000
+
+static const app_info_t app_table[] = {
+    /* Pinned to the top of the list, in this order. */
+    { "mini_browser",            0,            false, icon_browser   },
+    { "badgevms_settings",       1,            false, icon_settings  },
+    { "why2025_namebadge",       2,            false, icon_nametag   },
+    /* Never listed. */
+    { "badgevms_launcher",       RANK_DEFAULT, true,  icon_chip      },
+    { "why2025_firmware_ota_c6", RANK_DEFAULT, true,  icon_ota       },
+    /* Custom icons only. */
+    { "why2025_sponsors",        RANK_DEFAULT, false, icon_star_bold },
+    { "wifi_test",               RANK_DEFAULT, false, icon_wifi      },
+    { "ota_wifi_update",         RANK_DEFAULT, false, icon_wifi      },
+    { "sdl_test",                RANK_DEFAULT, false, icon_snake     },
+    { "doomgeneric",             RANK_DEFAULT, false, icon_chip      },
+    { "curl_test",               RANK_DEFAULT, false, icon_plug      },
+    { "sdl_serial_demo",         RANK_DEFAULT, false, icon_plug      },
+    { "hardware_test",           RANK_DEFAULT, false, icon_chip      },
+    { "hello",                   RANK_DEFAULT, false, icon_hello     },
+    { "why2025_ota",             RANK_DEFAULT, false, icon_ota       },
+};
+
+static const app_info_t *app_info_find(const char *uid) {
+    if (!uid) return NULL;
+    for (size_t i = 0; i < sizeof(app_table) / sizeof(app_table[0]); ++i) {
+        if (strcmp(uid, app_table[i].uid) == 0) return &app_table[i];
+    }
+    return NULL;
+}
+
+/* UID->icon mapping; unknown applications get the chip icon */
 static void draw_app_icon(fbview_t *ctx, const char *uid, int x, int y, int sz, bool selected) {
-    if (!uid) uid = "";
-    if (strstr(uid, "mini_browser"))      { icon_browser(ctx, x, y, sz, selected); return; }
-    if (strstr(uid, "settings"))          { icon_settings(ctx,x, y, sz, selected); return; }
-    if (strstr(uid, "why2025_namebadge")) { icon_nametag(ctx, x, y, sz, selected); return; }
-    if (strstr(uid, "sponsors"))          { icon_star_bold(ctx,x,y,sz,selected); return; }
-    if (strstr(uid, "wifi"))              { icon_wifi(ctx,x,y,sz,selected); return; }
-    if (strstr(uid, "sdl_test"))          { icon_snake(ctx,x,y,sz,selected); return; }
-    if (strstr(uid, "doom"))              { icon_chip(ctx,x,y,sz,selected); return; }
-    if (strstr(uid, "curl"))              { icon_plug(ctx,x,y,sz,selected); return; }
-    if (strstr(uid, "serial"))            { icon_plug(ctx,x,y,sz,selected); return; }
-    if (strstr(uid, "hardware"))          { icon_chip(ctx,x,y,sz,selected); return; }
-    if (strstr(uid, "hello"))             { icon_hello(ctx,x,y,sz,selected); return; }
-    if (strstr(uid, "ota"))               { icon_ota(ctx,x,y,sz,selected); return; }
-    icon_chip(ctx,x,y,sz,selected);
+    const app_info_t *info = app_info_find(uid);
+    icon_fn_t icon = info ? info->icon : icon_chip;
+    icon(ctx, x, y, sz, selected);
 }
 
 /* ===========================================================
    Launcher context
    =========================================================== */
+#define ROWS_VISIBLE        7
+#define STATUS_TIMEOUT_MS   2000
+
+/* Visible applications; apps[] points into the BadgeVMS list handle. */
+typedef struct {
+    application_list_handle handle;
+    application_t         **apps;
+    size_t                  num;
+} launcher_apps_t;
+
 typedef struct {
     window_handle_t window;
     framebuffer_t  *framebuffer;
     uint16_t       *pixels;
+    launcher_apps_t *list;
     application_t **applications;
     int             scroll_offset;
     int             selected_item;
@@ -409,7 +453,9 @@ typedef struct {
     bool            show_about;
     bool            quit;
     bool            screenshot_pending;
+    bool            why_held;      /* WHY (GUI) key currently down */
     int             about_index;
+    char            status[64];    /* footer status line, "" = none */
 } Launcher_Context;
 
 /* ===========================================================
@@ -429,18 +475,12 @@ static void draw_window(Launcher_Context *ctx) {
     const int th = 48;
     draw_title_bar(&v, wx + 2, wy + 2, ww - 4, th, "WHY Launcher");
 
-    char info[96];
-    snprintf(info, sizeof(info), "To navigate   Enter: Launch   A: About   ESC: Exit");
-    draw_text(&v, wx + 16, wy + th + 12, info, COL_TEXT_MID);
-
-    /* Accent swatches to verify palette on-device ... not in use...
-    int bx = wx + ww - 16 - 6*10, by = wy + th + 10;
-    uint32_t acc[6] = { COL_ACCENT_1, COL_ACCENT_2, COL_ACCENT_3, COL_ACCENT_4, COL_ACCENT_5, COL_ACCENT_6 };
-    for (int i=0;i<6;i++){ draw_rect(&v, bx + i*10, by, 8, 8, acc[i]); } */
+    draw_text(&v, wx + 16, wy + th + 12,
+              "Up/Down: Select  Enter: Launch  A: About  R: Refresh", COL_TEXT_MID);
 
     const int list_y = wy + th + 36;
     const int list_h = wh - th - 84;
-    const int item_h = 78;
+    const int item_h = (list_h - 6) / ROWS_VISIBLE;
     const int list_x = wx + 12;
     const int list_w = ww - 24;
 
@@ -451,14 +491,26 @@ static void draw_window(Launcher_Context *ctx) {
     draw_rect(&v, list_x + list_w - 1, list_y, 1, list_h, COL_DIVIDER);
 
     draw_rect(&v, wx + 2, wy + wh - 40, ww - 4, 38, COL_BTN);
-    draw_text(&v, wx + 16, wy + wh - 32, "WHY2025 • BadgeVMS", COL_BTN_TEXT);
+    static const char footer[] = "WHY2025 - BadgeVMS";
+    draw_text(&v, wx + 16, wy + wh - 32, footer, COL_BTN_TEXT);
 
- /*   ctx->items_per_page = (list_h - 6) / item_h; */
-/*    ...now 7...... */
+    if (ctx->status[0]) {
+        /* Right-aligned status, truncated so it never overlaps the footer. */
+        char msg[sizeof(ctx->status)];
+        int max_chars = (ww - 48 - text_w(footer)) / FONT_WIDTH;
+        if (max_chars < 0) max_chars = 0;
+        if (max_chars > (int)sizeof(msg) - 1) max_chars = (int)sizeof(msg) - 1;
+        snprintf(msg, (size_t)max_chars + 1, "%s", ctx->status);
+        draw_text(&v, wx + ww - 16 - text_w(msg), wy + wh - 32, msg, COL_ACCENT_6);
+    }
 
-    ctx->items_per_page = (list_h - 6) / item_h;
-    if (ctx->items_per_page < 7) ctx->items_per_page = 7;
-    
+    ctx->items_per_page = ROWS_VISIBLE;
+
+    if (ctx->total_items <= 0) {
+        draw_text_center(&v, list_x, list_y + (list_h - FONT_HEIGHT) / 2, list_w,
+                         "No applications installed", COL_TEXT_MID);
+    }
+
     int start = ctx->scroll_offset;
     int end   = start + ctx->items_per_page;
     if (end > ctx->total_items) end = ctx->total_items;
@@ -553,7 +605,8 @@ static void draw_about(Launcher_Context *ctx, application_t *app) {
  */
 #define IMG_RAW_CHUNK       48
 #define IMG_FEC_GROUP        4
-#define SCREENSHOT_PACE_MS   8
+#define SCREENSHOT_PACE_MS   8   /* pause after every SCREENSHOT_PACE_EVERY records */
+#define SCREENSHOT_PACE_EVERY 4
 
 typedef struct {
     unsigned char raw[IMG_RAW_CHUNK];
@@ -617,8 +670,12 @@ static size_t screenshot_base64_encode(char *out, size_t out_size,
 
 static void screenshot_transport_pause(void) {
     /* badgevms_launcher is built as a VMS app against sdk_staging and does
-       not have direct FreeRTOS headers/API available.  stdout is already
-       flushed after every transport record; keep this dependency-free. */
+       not have direct FreeRTOS headers/API available.  Use the BadgeVMS
+       wait() call with a timeout as a short sleep so the host receiver and
+       USB-serial bridge can keep up.  It may return early if a child process
+       exits, which only shortens the pause. */
+    static unsigned records;
+    if (++records % SCREENSHOT_PACE_EVERY == 0) (void)wait(true, SCREENSHOT_PACE_MS);
 }
 
 static bool screenshot_send_parity(screenshot_stream_t *stream) {
@@ -724,15 +781,151 @@ static bool screenshot_stream_framebuffer(const uint16_t *pixels) {
 }
 
 /* ===========================================================
+   Application list
+   =========================================================== */
+static void launcher_apps_free(launcher_apps_t *l) {
+    if (!l) return;
+    free(l->apps);
+    if (l->handle) application_list_close(l->handle);
+    l->apps   = NULL;
+    l->handle = NULL;
+    l->num    = 0;
+}
+
+static bool app_is_listed(const application_t *app) {
+    if (!app->binary_path || !app->binary_path[0] || !app->unique_identifier) return false;
+    const app_info_t *info = app_info_find(app->unique_identifier);
+    return !(info && info->hidden);
+}
+
+static int app_rank(const application_t *app) {
+    const app_info_t *info = app_info_find(app->unique_identifier);
+    return info ? info->rank : RANK_DEFAULT;
+}
+
+static int str_casecmp(const char *a, const char *b) {
+    for (;; ++a, ++b) {
+        int ca = tolower((unsigned char)*a), cb = tolower((unsigned char)*b);
+        if (ca != cb || !ca) return ca - cb;
+    }
+}
+
+/* Sort by (rank, name, uid) */
+static int app_compare(const void *pa, const void *pb) {
+    const application_t *a = *(application_t *const *)pa;
+    const application_t *b = *(application_t *const *)pb;
+    int ra = app_rank(a), rb = app_rank(b);
+    if (ra != rb) return ra < rb ? -1 : 1;
+    int c = str_casecmp(a->name ? a->name : S(a->unique_identifier),
+                        b->name ? b->name : S(b->unique_identifier));
+    if (c) return c;
+    return strcmp(S(a->unique_identifier), S(b->unique_identifier));
+}
+
+/* Query BadgeVMS for installed applications and build the visible, sorted
+   list.  On failure *out is left untouched and false is returned. */
+static bool launcher_apps_build(launcher_apps_t *out) {
+    launcher_apps_t l   = {0};
+    application_t  *app = NULL;
+    size_t          cap = 0;
+
+    l.handle = application_list(&app);
+    if (!l.handle) {
+        printf("Could not query installed applications\n");
+        return false;
+    }
+
+    printf("Currently installed applications:\n");
+    while (app) {
+        printf("Name: %s\n", S(app->name));
+        printf("  UID: %s\n", S(app->unique_identifier));
+        printf("  Version: %s\n", S(app->version));
+        printf("  Binary : %s\n", S(app->binary_path));
+
+        if (app_is_listed(app)) {
+            if (l.num == cap) {
+                size_t new_cap = cap ? cap * 2 : 16;
+                application_t **tmp = (application_t **)realloc(l.apps, sizeof(*tmp) * new_cap);
+                if (!tmp) {
+                    printf("Out of memory building application list\n");
+                    launcher_apps_free(&l);
+                    return false;
+                }
+                l.apps = tmp;
+                cap    = new_cap;
+            }
+            l.apps[l.num++] = app;
+        } else {
+            printf("  -> HIDDEN\n");
+        }
+        app = application_list_get_next(l.handle);
+    }
+
+    if (l.num > 1) qsort(l.apps, l.num, sizeof(*l.apps), app_compare);
+
+    for (size_t i = 0; i < l.num; ++i) {
+        printf("FINAL_ORDER[%zu]: %s (%s)\n", i, S(l.apps[i]->name), S(l.apps[i]->unique_identifier));
+    }
+
+    *out = l;
+    return true;
+}
+
+static void clamp_selection(Launcher_Context *ctx) {
+    if (ctx->items_per_page <= 0) ctx->items_per_page = ROWS_VISIBLE;
+    if (ctx->selected_item >= ctx->total_items) ctx->selected_item = ctx->total_items - 1;
+    if (ctx->selected_item < 0) ctx->selected_item = 0;
+    int max_scroll = ctx->total_items - ctx->items_per_page;
+    if (max_scroll < 0) max_scroll = 0;
+    if (ctx->scroll_offset > max_scroll) ctx->scroll_offset = max_scroll;
+    if (ctx->scroll_offset > ctx->selected_item) ctx->scroll_offset = ctx->selected_item;
+    if (ctx->selected_item >= ctx->scroll_offset + ctx->items_per_page)
+        ctx->scroll_offset = ctx->selected_item - ctx->items_per_page + 1;
+    if (ctx->scroll_offset < 0) ctx->scroll_offset = 0;
+}
+
+static void refresh_list(Launcher_Context *ctx) {
+    launcher_apps_t fresh;
+    if (!launcher_apps_build(&fresh)) {
+        snprintf(ctx->status, sizeof(ctx->status), "Refresh failed");
+        return;
+    }
+    launcher_apps_free(ctx->list);
+    *ctx->list         = fresh;
+    ctx->applications  = fresh.apps;
+    ctx->total_items   = (int)fresh.num;
+    ctx->about_index   = -1;
+    clamp_selection(ctx);
+}
+
+/* ===========================================================
    Input handling
    =========================================================== */
-static void handle_keyboard(Launcher_Context *ctx, keyboard_scancode_t code) {
+static bool is_why_key(keyboard_scancode_t code) {
+    return code == KEY_SCANCODE_LGUI || code == KEY_SCANCODE_RGUI;
+}
+
+static void launch_selected(Launcher_Context *ctx) {
+    if (ctx->total_items <= 0 || ctx->selected_item < 0 || ctx->selected_item >= ctx->total_items) return;
+    application_t *app = ctx->applications[ctx->selected_item];
+    printf("Launching: %s\n", S(app->name));
+    pid_t pid = application_launch(app->unique_identifier);
+    if (pid < 0) {
+        printf("Launch failed: %s\n", S(app->unique_identifier));
+        snprintf(ctx->status, sizeof(ctx->status), "Launch failed: %s",
+                 app->name ? app->name : S(app->unique_identifier));
+    }
+}
+
+/* Returns true when the screen needs to be redrawn. */
+static bool handle_keyboard(Launcher_Context *ctx, keyboard_scancode_t code, key_mod_t mod) {
     if (ctx->show_about) {
         if (code == KEY_SCANCODE_ESCAPE || code == KEY_SCANCODE_RETURN || code == KEY_SCANCODE_SPACE) {
             ctx->show_about  = false;
             ctx->about_index = -1;
+            return true;
         }
-        return;
+        return false;
     }
 
     switch (code) {
@@ -741,6 +934,7 @@ static void handle_keyboard(Launcher_Context *ctx, keyboard_scancode_t code) {
                 ctx->selected_item--;
                 if (ctx->selected_item < ctx->scroll_offset)
                     ctx->scroll_offset = ctx->selected_item;
+                return true;
             }
             break;
 
@@ -749,71 +943,51 @@ static void handle_keyboard(Launcher_Context *ctx, keyboard_scancode_t code) {
                 ctx->selected_item++;
                 if (ctx->selected_item >= ctx->scroll_offset + ctx->items_per_page)
                     ctx->scroll_offset = ctx->selected_item - ctx->items_per_page + 1;
+                return true;
             }
             break;
 
         case KEY_SCANCODE_RETURN:
         case KEY_SCANCODE_SPACE:
-            printf("Launching: %s\n", ctx->applications[ctx->selected_item]->name);
-            application_launch(ctx->applications[ctx->selected_item]->unique_identifier);
-            break;
+            launch_selected(ctx);
+            return ctx->status[0] != '\0';
 
         case KEY_SCANCODE_A:
+            if (ctx->total_items <= 0) break;
             ctx->about_index = ctx->selected_item;
             ctx->show_about  = true;
-            break;
+            return true;
+
+        case KEY_SCANCODE_R:
+            refresh_list(ctx);
+            return true;
 
         case KEY_SCANCODE_S:
-            /* WHY+S on the badge arrives here as the S scancode. */
-            ctx->screenshot_pending = true;
-            break;
-
-        case KEY_SCANCODE_ESCAPE:
-            ctx->quit = true;
+            /* WHY+S: the modifier is set by the physical keyboard (and newer
+               serial-keyboard firmware); older serial-keyboard firmware sends
+               WHY down/up as separate events without modifiers, so the held
+               state is tracked in the event loop as well. */
+            if ((mod & BADGEVMS_KMOD_GUI) || ctx->why_held) {
+                ctx->screenshot_pending = true;
+                return true;
+            }
             break;
 
         default: break;
     }
+    return false;
 }
-
-/* ===========================================================
-   Priority bucketing (optional)
-   =========================================================== */
-static bool is_priority_uid(const char *uid) {
-    if (!uid) return false;
-    return
-        (strcmp(uid, "mini_browser") == 0) ||
-        (strcmp(uid, "badgevms_settings") == 0) ||
-        (strcmp(uid, "why2025_namebadge") == 0);
-}
-
-
-static void move_uid_to_front(application_t **apps, size_t num, const char *uid) {
-    if (!apps || num == 0 || !uid) return;
-    size_t idx = (size_t)-1;
-    for (size_t i = 0; i < num; ++i) {
-        if (apps[i] && apps[i]->unique_identifier &&
-            strcmp(apps[i]->unique_identifier, uid) == 0) {
-            idx = i;
-            break;
-        }
-    }
-    if (idx == (size_t)-1 || idx == 0) return;        // not found or already first
-    application_t *hit = apps[idx];
-    memmove(&apps[1], &apps[0], idx * sizeof(*apps)); // shift block right by 1
-    apps[0] = hit;
-}
-
-
 
 /* ===========================================================
    Main loop
    =========================================================== */
-static bool run_launcher(application_t **apps, size_t num) {
+static bool run_launcher(launcher_apps_t *list) {
     Launcher_Context ctx = (Launcher_Context){0};
-    ctx.applications  = apps;
-    ctx.total_items   = (int)num;
-    ctx.about_index   = -1;
+    ctx.list           = list;
+    ctx.applications   = list->apps;
+    ctx.total_items    = (int)list->num;
+    ctx.items_per_page = ROWS_VISIBLE;
+    ctx.about_index    = -1;
 
     ctx.window = window_create(
         "Application Launcher",
@@ -825,38 +999,64 @@ static bool run_launcher(application_t **apps, size_t num) {
     ctx.framebuffer = window_framebuffer_create(
         ctx.window, (window_size_t){SCREEN_WIDTH, SCREEN_HEIGHT}, BADGEVMS_PIXELFORMAT_RGB565
     );
-    if (!ctx.framebuffer) { printf("Framebuffer texture could not be created\n"); return false; }
+    if (!ctx.framebuffer) {
+        printf("Framebuffer texture could not be created\n");
+        window_destroy(ctx.window);
+        return false;
+    }
 
     ctx.pixels = ctx.framebuffer->pixels;
 
+    /* Every frame is redrawn completely before it is presented, so the
+       double-buffer swap never shows stale content. */
+    bool dirty = true;
     while (!ctx.quit) {
-        memset(ctx.pixels, 0, SCREEN_WIDTH * SCREEN_HEIGHT * sizeof(uint16_t));
-
-        draw_window(&ctx);
-        if (ctx.show_about) {
-            application_t *a = NULL;
-            if (ctx.about_index >= 0 && ctx.about_index < ctx.total_items) {
-                a = ctx.applications[ctx.about_index];
+        if (dirty) {
+            draw_window(&ctx);
+            if (ctx.show_about) {
+                application_t *a = NULL;
+                if (ctx.about_index >= 0 && ctx.about_index < ctx.total_items) {
+                    a = ctx.applications[ctx.about_index];
+                }
+                draw_about(&ctx, a);
             }
-            draw_about(&ctx, a);
+
+            if (ctx.screenshot_pending) {
+                ctx.screenshot_pending = false;
+                printf("[launcher] screenshot: 720x720 visible framebuffer\n");
+                fflush(stdout);
+                screenshot_stream_framebuffer(ctx.pixels);
+            }
+
+            window_present(ctx.window, true, NULL, 0);
+            dirty = false;
         }
 
-        if (ctx.screenshot_pending) {
-            ctx.screenshot_pending = false;
-            printf("[launcher] screenshot: 720x720 visible framebuffer\n");
-            fflush(stdout);
-            screenshot_stream_framebuffer(ctx.pixels);
-        }
+        /* Block for input; while a status message is shown, time out so it
+           can be cleared after STATUS_TIMEOUT_MS. */
+        event_t e = ctx.status[0]
+            ? window_event_poll(ctx.window, false, STATUS_TIMEOUT_MS)
+            : window_event_poll(ctx.window, true, 0);
 
-        window_present(ctx.window, true, NULL, 0);
-
-        event_t e = window_event_poll(ctx.window, true, 0);
         if (e.type == EVENT_QUIT) {
             ctx.quit = true;
-        } else if (e.type == EVENT_KEY_DOWN) {
-            handle_keyboard(&ctx, e.keyboard.scancode);
+        } else if (e.type == EVENT_KEY_DOWN || e.type == EVENT_KEY_UP) {
+            if (is_why_key(e.keyboard.scancode)) {
+                ctx.why_held = (e.type == EVENT_KEY_DOWN);
+            } else if (e.type == EVENT_KEY_DOWN) {
+                if (ctx.status[0]) {
+                    ctx.status[0] = '\0';
+                    dirty = true;
+                }
+                if (handle_keyboard(&ctx, e.keyboard.scancode, e.keyboard.mod)) dirty = true;
+            }
+        } else if (e.type == EVENT_NONE && ctx.status[0]) {
+            ctx.status[0] = '\0';
+            dirty = true;
         }
     }
+
+    window_destroy(ctx.window);
     return true;
 }
 
@@ -864,61 +1064,17 @@ static bool run_launcher(application_t **apps, size_t num) {
    Entry point
    =========================================================== */
 int main(int argc, char *argv[]) {
-    application_t          *app;
-    application_list_handle list = application_list(&app);
+    (void)argc;
+    (void)argv;
 
-    application_t **prio = NULL, **rest = NULL;
-    size_t n_prio = 0, n_rest = 0;
+    /* An empty list is still usable: the launcher shows a message and R
+       retries the query. */
+    launcher_apps_t list = {0};
+    launcher_apps_build(&list);
 
-    printf("Currently installed applications:\n");
-    while (app) {
-        printf("Name: %s\n", app->name);
-        printf("  UID: %s\n", app->unique_identifier);
-        printf("  Version: %s\n", app->version);
-        printf("  Binary : %s\n", app->binary_path);
+    bool ok = run_launcher(&list);
 
-        if (app->binary_path && app->binary_path[0] &&
-            app->unique_identifier &&
-            strcmp(app->unique_identifier, "badgevms_launcher") != 0 &&
-            strcmp(app->unique_identifier, "why2025_firmware_ota_c6") != 0) {
-
-            if (is_priority_uid(app->unique_identifier)) {
-                prio = (application_t**)realloc(prio, sizeof(*prio) * (n_prio + 1));
-                prio[n_prio++] = app;
-                printf("  -> BUCKET: PRIORITY\n");
-            } else {
-                rest = (application_t**)realloc(rest, sizeof(*rest) * (n_rest + 1));
-                rest[n_rest++] = app;
-                printf("  -> BUCKET: REST\n");
-            }
-        }
-        app = application_list_get_next(list);
-    }
-
-    size_t num = n_prio + n_rest;
-    application_t **apps = (application_t**)malloc(sizeof(*apps) * num);
-    size_t idx = 0;
-    for (size_t i = 0; i < n_prio; ++i) apps[idx++] = prio[i];
-    for (size_t i = 0; i < n_rest; ++i) apps[idx++] = rest[i];
-
-    /* >>> Add this line to force Mini Browser to position #1 */
-    // after building apps[]
-    /* move_uid_to_front(apps, num, "third_app");
-    move_uid_to_front(apps, num, "second_app");
-    move_uid_to_front(apps, num, "mini_browser"); // ends up first */
-    /* move mini_browser to top */
-
-    move_uid_to_front(apps, num, "mini_browser");
-
-    for (size_t i = 0; i < num; ++i) {
-        printf("FINAL_ORDER[%zu]: %s (%s)\n", i, apps[i]->name, apps[i]->unique_identifier);
-    }   
-
-    bool ok = run_launcher(apps, num);
-
-    free(prio);
-    free(rest);
-    free(apps);
+    launcher_apps_free(&list);
 
     return ok ? 0 : 1;
 }

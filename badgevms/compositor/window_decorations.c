@@ -19,6 +19,8 @@
 #include "font.h"
 #include "pixel_functions.h"
 
+#include <string.h>
+
 #define TAG "window_decorations"
 
 #define RGB565(r, g, b) ((uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)))
@@ -69,7 +71,8 @@ IRAM_ATTR void draw_window_box(uint16_t *fb, window_t *window, bool foreground) 
     // Draw title bar background
     if (foreground) {
         // Foreground window: black title bar
-        draw_filled_rect_rotated(fb, x + 1, y + 1, total_width, BORDER_TOP_PX, window_colors.fg_titlebar_background);
+        // Stay inside the outer border and stop above the content border (content starts at y + BORDER_TOP_PX)
+        draw_filled_rect_rotated(fb, x + 1, y + 1, total_width - 2, BORDER_TOP_PX - 1, window_colors.fg_titlebar_background);
 
         // Top-left corner - simple L-shaped accent
         draw_filled_rect_rotated(fb, x + 3, y + 3, 3, 1, window_colors.fg_titlebar_corner_accents);
@@ -101,11 +104,18 @@ IRAM_ATTR void draw_window_box(uint16_t *fb, window_t *window, bool foreground) 
         );
 
         // Add dither pattern to title bar to make it look faded/inactive
+        // Sparse dither pattern: pixels where (dither_x + dither_y) % 3 == 0
         for (int dither_y = y + 2; dither_y < y + BORDER_TOP_PX - 1; dither_y++) {
-            for (int dither_x = x + 2; dither_x < x + total_width - 2; dither_x++) {
-                if ((dither_x + dither_y) % 3 == 0) { // Sparse dither pattern
-                    draw_pixel_rotated(fb, dither_x, dither_y, window_colors.bg_titlebar_dither_pattern);
-                }
+            int start_x = x + 2;
+            int phase   = (start_x + dither_y) % 3;
+            if (phase < 0) {
+                phase += 3; // x/y may be negative for partially off-screen windows
+            }
+            if (phase) {
+                start_x += 3 - phase;
+            }
+            for (int dither_x = start_x; dither_x < x + total_width - 2; dither_x += 3) {
+                draw_pixel_rotated(fb, dither_x, dither_y, window_colors.bg_titlebar_dither_pattern);
             }
         }
 
@@ -123,19 +133,22 @@ IRAM_ATTR void draw_window_box(uint16_t *fb, window_t *window, bool foreground) 
 // Title text
 // Only draw a title when the window explicitly provides one.
 // Do not invent "FOREGROUND" / "BACKGROUND" labels for untitled windows.
-if (window->title && window->title[0] != '\0') {
-    char title[21];
-    strncpy(title, window->title, 20);
-    title[20] = '\0';
-
-    int max_text = strlen(title);
-    int text_width;
+char title[21];
+window_title_copy(window, title, sizeof(title));
+if (title[0] != '\0') {
     int title_bar_width = total_width - 4; // Account for borders
 
-    do {
-        title[max_text--] = '\0';
-        text_width        = strlen(title) * (FONT_WIDTH + 1) - 1;
-    } while (text_width > title_bar_width);
+    // Each glyph takes FONT_WIDTH + 1 pixels, minus the trailing gap
+    int max_chars = (title_bar_width + 1) / (FONT_WIDTH + 1);
+    int len       = strlen(title);
+    if (max_chars < 0) {
+        max_chars = 0;
+    }
+    if (len > max_chars) {
+        len        = max_chars;
+        title[len] = '\0';
+    }
+    int text_width = len * (FONT_WIDTH + 1) - 1;
 
     int text_x = x + 2 + (title_bar_width - text_width) / 2;
     int text_y = y + (BORDER_TOP_PX - FONT_HEIGHT) / 2; // Center vertically in title bar

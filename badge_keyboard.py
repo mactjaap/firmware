@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import argparse
 import os
 import select
 import sys
@@ -10,24 +11,34 @@ import tty
 
 import serial
 
+from badge_serial import find_port, key_line, send_key
+
 
 DEVICE = "/dev/cu.wchusbserial10"
 BAUD = 115200
 
+# Pause after every key event so the badge's serial line parser keeps up.
+EVENT_PACING = 0.005
+
+WHY_SCANCODE = 0xE3
+
+# Ctrl-<letter> -> WHY+<letter>.  Ctrl-I/J/M are Tab/Enter in a terminal and
+# are handled as such.  The help text is generated from this map.
+CTRL_MAP = {
+    ord(letter) - ord("A") + 1: letter
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if letter not in "IJM"
+}
+
 
 def tx(ser, scancode, down, text=0):
-    command = f"E {scancode:02X} {1 if down else 0} {text:02X}\n"
-
     print(
-        f"[TX] {command.strip()}",
+        f"[TX] {key_line(scancode, down, text).decode('ascii').strip()}",
         file=sys.stderr
     )
 
-    ser.write(
-        command.encode("ascii")
-    )
-
-    ser.flush()
+    send_key(ser, scancode, down, text)
+    time.sleep(EVENT_PACING)
 
 
 def press(ser, scancode, text=0):
@@ -47,7 +58,7 @@ def press(ser, scancode, text=0):
 
 
 def why(ser, letter):
-    why_scancode = 0xE3
+    why_scancode = WHY_SCANCODE
 
     letter = letter.upper()
 
@@ -165,6 +176,8 @@ ESCAPES = {
     b"\x1bOF": 0x4D,
 
     b"\x1b[3~": 0x4C,  # Delete
+    b"\x1b[5~": 0x4B,  # Page Up
+    b"\x1b[6~": 0x4E,  # Page Down
 }
 
 
@@ -198,11 +211,19 @@ def read_escape(fd):
         if current.endswith(b"~"):
             break
 
+        # Any other complete CSI/SS3 sequence ends with a final byte.
+        if (
+            len(current) >= 3
+            and current[1:2] in (b"[", b"O")
+            and 0x40 <= current[-1] <= 0x7E
+        ):
+            break
+
     return bytes(result)
 
 
-def serial_reader(ser):
-    while True:
+def serial_reader(ser, stop):
+    while not stop.is_set():
         try:
             data = ser.read(1024)
 
@@ -212,64 +233,108 @@ def serial_reader(ser):
                     data
                 )
 
-        except Exception:
+        except Exception as exc:
+            if not stop.is_set():
+                print(
+                    f"\r\n[serial reader stopped: {type(exc).__name__}: {exc}]",
+                    file=sys.stderr
+                )
             return
 
         time.sleep(0.01)
 
 
+def ctrl_help():
+    letters = " ".join(CTRL_MAP[value] for value in sorted(CTRL_MAP))
+    return f"Ctrl-<X> = WHY+<X> for X in: {letters}"
+
+
 def main():
-    ser = serial.Serial(
-        DEVICE,
-        BAUD,
-        timeout=0
+    parser = argparse.ArgumentParser(
+        description="Forward terminal keystrokes to the badge's serial keyboard."
     )
+    parser.add_argument(
+        "--port",
+        default=None,
+        help=f"serial device (default: $BADGE_PORT, auto-detect, then {DEVICE})",
+    )
+    parser.add_argument(
+        "--baud",
+        type=int,
+        default=BAUD,
+        help=f"serial baud rate (default: {BAUD})",
+    )
+    args = parser.parse_args()
+
+    device = args.port or find_port(DEVICE)
+
+    with serial.Serial(device, args.baud, timeout=0) as ser:
+        print(
+            f"Connected to {device}",
+            file=sys.stderr
+        )
+
+        print(
+            ctrl_help(),
+            file=sys.stderr
+        )
+
+        print(
+            "Ctrl-] exits",
+            file=sys.stderr
+        )
+
+        stop = threading.Event()
+
+        thread = threading.Thread(
+            target=serial_reader,
+            args=(ser, stop),
+            daemon=True
+        )
+
+        thread.start()
+
+        try:
+            forward_keys(ser)
+        finally:
+            stop.set()
+            thread.join(timeout=1.0)
 
     print(
-        f"Connected to {DEVICE}",
+        "\nDisconnected",
         file=sys.stderr
     )
 
-    print(
-        "Ctrl-E = WHY+E, Ctrl-H = WHY+H, "
-        "Ctrl-R = WHY+R, Ctrl-B = WHY+B, "
-        "Ctrl-G = WHY+G, Ctrl-F = WHY+F, "
-        "Ctrl-Q = WHY+Q",
-        file=sys.stderr
-    )
 
-    print(
-        "Ctrl-] exits",
-        file=sys.stderr
-    )
-
-    thread = threading.Thread(
-        target=serial_reader,
-        args=(ser,),
-        daemon=True
-    )
-
-    thread.start()
-
+def forward_keys(ser):
     fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
+    is_tty = os.isatty(fd)
+
+    if not is_tty:
+        print(
+            "stdin is not a terminal; forwarding input until EOF",
+            file=sys.stderr
+        )
+
+    old = termios.tcgetattr(fd) if is_tty else None
 
     try:
-        tty.setraw(fd)
+        if is_tty:
+            tty.setraw(fd)
 
-        attrs = termios.tcgetattr(fd)
-        attrs[1] |= termios.OPOST | termios.ONLCR
-        termios.tcsetattr(
-            fd,
-            termios.TCSANOW,
-            attrs
-        )
+            attrs = termios.tcgetattr(fd)
+            attrs[1] |= termios.OPOST | termios.ONLCR
+            termios.tcsetattr(
+                fd,
+                termios.TCSANOW,
+                attrs
+            )
 
         while True:
             b = os.read(fd, 1)
 
             if not b:
-                continue
+                break
 
             value = b[0]
 
@@ -279,19 +344,23 @@ def main():
             if value == 0x1B:
                 sequence = read_escape(fd)
 
+                if sequence == b"\x1b":
+                    # A lone ESC key press.
+                    press(
+                        ser,
+                        0x29
+                    )
+                    continue
+
                 scancode = ESCAPES.get(
                     sequence
                 )
 
+                # Unknown sequences are ignored rather than sent as ESC.
                 if scancode is not None:
                     press(
                         ser,
                         scancode
-                    )
-                else:
-                    press(
-                        ser,
-                        0x29
                     )
 
                 continue
@@ -312,7 +381,7 @@ def main():
 
                 continue
 
-            if value in (0x08, 0x7F):
+            if value == 0x7F:
                 press(
                     ser,
                     0x2A
@@ -320,12 +389,8 @@ def main():
 
                 continue
 
-            if 1 <= value <= 26:
-                letter = chr(
-                    ord("A") +
-                    value -
-                    1
-                )
+            if value in CTRL_MAP:
+                letter = CTRL_MAP[value]
 
                 why(
                     ser,
@@ -349,18 +414,12 @@ def main():
                     )
 
     finally:
-        termios.tcsetattr(
-            fd,
-            termios.TCSADRAIN,
-            old
-        )
-
-        ser.close()
-
-        print(
-            "\nDisconnected",
-            file=sys.stderr
-        )
+        if old is not None:
+            termios.tcsetattr(
+                fd,
+                termios.TCSADRAIN,
+                old
+            )
 
 
 if __name__ == "__main__":

@@ -31,11 +31,6 @@
 
 void BADGEVMS_PumpEvents(SDL_VideoDevice *_this)
 {
-    SDL_DisplayID display_id = SDL_GetPrimaryDisplay();
-    if (display_id == 0) {
-        return;
-    }
-
     // Get all windows on this display
     SDL_Window **windows = SDL_GetWindows(NULL);
     if (!windows) {
@@ -74,21 +69,23 @@ void BADGEVMS_PumpEvents(SDL_VideoDevice *_this)
 
             case EVENT_KEY_DOWN:
             case EVENT_KEY_UP:
-                sdl_event.type = badgevms_event.keyboard.down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
-                sdl_event.key.windowID = SDL_GetWindowID(sdl_window);
-                sdl_event.key.scancode = badgevms_event.keyboard.scancode;
-                sdl_event.key.key = SDL_GetKeyFromScancode(badgevms_event.keyboard.scancode, badgevms_event.keyboard.mod, true);
-                sdl_event.key.mod = badgevms_event.keyboard.mod;
-                sdl_event.key.down = badgevms_event.keyboard.down;
-                sdl_event.key.repeat = badgevms_event.keyboard.repeat;
-                sdl_event.key.timestamp = SDL_GetTicksNS();
-                SDL_PushEvent(&sdl_event);
+            {
+                // BadgeVMS only delivers key events to the foreground window
+                if (SDL_GetKeyboardFocus() != sdl_window) {
+                    SDL_SetKeyboardFocus(sdl_window);
+                }
 
-                if (badgevms_event.keyboard.down && badgevms_event.keyboard.text != 0) {
-                    char text[2] = { badgevms_event.keyboard.text, 0 };
+                // Go through SDL's keyboard code so SDL_GetKeyboardState()/SDL_GetModState() are updated
+                SDL_Scancode scancode = (SDL_Scancode)badgevms_event.keyboard.scancode;
+                SDL_SendKeyboardKey(0, SDL_DEFAULT_KEYBOARD_ID, (int)scancode, scancode, badgevms_event.keyboard.down);
+
+                unsigned char ch = (unsigned char)badgevms_event.keyboard.text;
+                if (badgevms_event.keyboard.down && ch >= 0x20 && ch <= 0x7e) {
+                    char text[2] = { (char)ch, 0 };
                     SDL_SendKeyboardText(text);
                 }
                 break;
+            }
 
             case EVENT_WINDOW_RESIZE:
                 break;

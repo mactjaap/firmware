@@ -22,6 +22,45 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#if BADGEVMS_SERIAL_KBD
+#define TTY_RX_BUF_SIZE 256
+
+static uint8_t     tty_rx_buf[TTY_RX_BUF_SIZE];
+static size_t      tty_rx_head = 0;
+static size_t      tty_rx_tail = 0;
+static portMUX_TYPE tty_rx_mux = portMUX_INITIALIZER_UNLOCKED;
+
+size_t tty_rx_push(uint8_t const *buf, size_t len) {
+    size_t pushed = 0;
+
+    taskENTER_CRITICAL(&tty_rx_mux);
+    while (pushed < len) {
+        size_t next = (tty_rx_head + 1) % TTY_RX_BUF_SIZE;
+        if (next == tty_rx_tail)
+            break;
+        tty_rx_buf[tty_rx_head] = buf[pushed++];
+        tty_rx_head             = next;
+    }
+    taskEXIT_CRITICAL(&tty_rx_mux);
+
+    return pushed;
+}
+
+static bool tty_rx_pop(uint8_t *c) {
+    bool ok = false;
+
+    taskENTER_CRITICAL(&tty_rx_mux);
+    if (tty_rx_tail != tty_rx_head) {
+        *c          = tty_rx_buf[tty_rx_tail];
+        tty_rx_tail = (tty_rx_tail + 1) % TTY_RX_BUF_SIZE;
+        ok          = true;
+    }
+    taskEXIT_CRITICAL(&tty_rx_mux);
+
+    return ok;
+}
+#endif
+
 typedef struct {
     device_t device;
     bool     is_stdout;
@@ -57,9 +96,18 @@ static ssize_t tty_read(void *dev, int fd, void *buf, size_t count) {
     if (device->is_stdin) {
         uint8_t c;
         while (1) {
+#if BADGEVMS_SERIAL_KBD
+            // The serial keyboard owns the UART RX FIFO, get our bytes from it
+            if (tty_rx_pop(&c))
+                break;
+            serial_kbd_poll();
+            if (tty_rx_pop(&c))
+                break;
+#else
             ETS_STATUS s = uart_rx_one_char(&c);
             if (s == ETS_OK)
                 break;
+#endif
             vTaskDelay(10 / portTICK_PERIOD_MS);
         }
         ((char *)buf)[0] = c;

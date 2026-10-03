@@ -68,3 +68,5 @@ typedef struct window {
 
 bool compositor_init(char const *lcd_device_name, char const *keyboard_device_name);
 void window_destroy_task(window_handle_t window);
+// Copy the window title (truncated to len - 1, "" if none) safely against window_title_set()
+void window_title_copy(window_t *window, char *buf, size_t len);

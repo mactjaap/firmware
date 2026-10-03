@@ -24,6 +24,7 @@
 #ifdef SDL_VIDEO_DRIVER_BADGEVMS
 
 #include "../../SDL3/src/events/SDL_events_c.h"
+#include "../../SDL3/src/events/SDL_keyboard_c.h"
 #include "../../SDL3/src/video/SDL_pixels_c.h"
 #include "../../SDL3/src/video/SDL_sysvideo.h"
 
@@ -168,6 +169,10 @@ bool BADGEVMS_VideoInit(SDL_VideoDevice *_this)
     }
 
     printf("BADGEVMS_VideoInit: Successfully added display ID %u\n", (unsigned int)display_id);
+
+    // Key events are sent with SDL_DEFAULT_KEYBOARD_ID, so register that keyboard
+    SDL_AddKeyboard(SDL_DEFAULT_KEYBOARD_ID, NULL, false);
+
     return true;
 }
 

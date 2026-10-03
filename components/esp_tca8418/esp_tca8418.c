@@ -44,7 +44,10 @@
 static const char *TAG = "tca8418";
 
 static uint8_t readRegister(tca8418_dev_t *tca8418_dev, uint8_t reg);
-static void writeRegister(tca8418_dev_t *tca8418_dev, uint8_t reg, uint8_t value);
+static esp_err_t writeRegister(tca8418_dev_t *tca8418_dev, uint8_t reg, uint8_t value);
+
+// Number of failed register writes, used to report configuration failures
+static unsigned write_failures;
 
 tca8418_dev_t *tca8418_create(gpio_num_t scl_pin, gpio_num_t sda_pin, uint8_t i2c_address, gpio_num_t notify_pin, uint8_t rows, uint8_t cols)
 {
@@ -114,6 +117,8 @@ tca8418_dev_t *tca8418_create(gpio_num_t scl_pin, gpio_num_t sda_pin, uint8_t i2
     }
     ESP_LOGI(TAG, "Device %02x found! Configuring for %zu (cols), %zu (rows)", tca8418_dev->i2c_address, tca8418_dev->cols, tca8418_dev->rows);
 
+    write_failures = 0;
+
     // set default all GPIO pins to INPUT.
     writeRegister(tca8418_dev, REG_GPIO_DIRECTION_1, 0x00);
     writeRegister(tca8418_dev, REG_GPIO_DIRECTION_2, 0x00);
@@ -160,6 +165,12 @@ tca8418_dev_t *tca8418_create(gpio_num_t scl_pin, gpio_num_t sda_pin, uint8_t i2
 #endif
             };
         ESP_ERROR_CHECK(gpio_config(&cfg));
+    }
+
+    if (write_failures)
+    {
+        // Keep the device: reads fail gracefully, so the rest of the system keeps running
+        ESP_LOGE(TAG, "%u register writes failed during configuration, keyboard may not work", write_failures);
     }
 
     return tca8418_dev;
@@ -218,12 +229,29 @@ void tca8418_flush(tca8418_dev_t *tca8418_dev)
 ///
 /// @param reg Register to read the value of.
 ///
-/// @return register value.
+/// @return register value, or 0 if the I2C transfer failed. 0 means "no
+/// events" for the event count and "no key" for the key event register, so
+/// callers simply skip a frame instead of rebooting the badge.
 static uint8_t readRegister(tca8418_dev_t *tca8418_dev, uint8_t reg)
 {
+    static unsigned read_failures;
     uint8_t receive_buf[1] = {0};
     ESP_LOGV(TAG, "Reading register %02x from dev %02x", reg, tca8418_dev->i2c_address);
-    ESP_ERROR_CHECK(i2c_bus_read_byte(tca8418_dev->dev_handle, reg, receive_buf));
+    esp_err_t err = i2c_bus_read_byte(tca8418_dev->dev_handle, reg, receive_buf);
+    if (err != ESP_OK)
+    {
+        // retry once, a single NACK should not cost a key event
+        err = i2c_bus_read_byte(tca8418_dev->dev_handle, reg, receive_buf);
+    }
+    if (err != ESP_OK)
+    {
+        // This is polled every frame, so rate limit the log
+        if (read_failures++ % 100 == 0)
+        {
+            ESP_LOGW(TAG, "Reading register %02x failed: %s (%u failures)", reg, esp_err_to_name(err), read_failures);
+        }
+        return 0;
+    }
     return receive_buf[0];
 }
 
@@ -231,8 +259,21 @@ static uint8_t readRegister(tca8418_dev_t *tca8418_dev, uint8_t reg)
 ///
 /// @param reg Register to write a value to.
 /// @param value Value to write to the register.
-static void writeRegister(tca8418_dev_t *tca8418_dev, uint8_t reg, uint8_t value)
+///
+/// @return ESP_OK or the I2C error.
+static esp_err_t writeRegister(tca8418_dev_t *tca8418_dev, uint8_t reg, uint8_t value)
 {
     ESP_LOGV(TAG, "Writing %02x to register %02x on dev %02x", value, reg, tca8418_dev->i2c_address);
-    ESP_ERROR_CHECK(i2c_bus_write_byte(tca8418_dev->dev_handle, reg, value));
+    esp_err_t err = i2c_bus_write_byte(tca8418_dev->dev_handle, reg, value);
+    if (err != ESP_OK)
+    {
+        // retry once
+        err = i2c_bus_write_byte(tca8418_dev->dev_handle, reg, value);
+    }
+    if (err != ESP_OK)
+    {
+        write_failures++;
+        ESP_LOGW(TAG, "Writing %02x to register %02x failed: %s", value, reg, esp_err_to_name(err));
+    }
+    return err;
 }
