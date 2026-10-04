@@ -569,6 +569,55 @@ void application_free(application_t *app) {
     why_free(app);
 }
 
+/*
+ * Optional "stack_size" (bytes) from the application's metadata/manifest
+ * JSON.  Kept out of application_t on purpose: that struct is part of the
+ * app ABI (the launcher and OTA app read it).  Returns 0 when absent or
+ * invalid, which makes the task layer use MIN_STACK_SIZE as before.  The
+ * task layer stores the size in a uint16_t, so it is capped at 65535.
+ */
+static size_t load_application_stack_size(char const *unique_identifier) {
+    char *metadata_path = get_metadata_path(unique_identifier);
+    if (!metadata_path)
+        return 0;
+
+    FILE *fp = why_fopen(metadata_path, "r");
+    why_free(metadata_path);
+    if (!fp)
+        return 0;
+
+    why_fseek(fp, 0, SEEK_END);
+    long file_size = why_ftell(fp);
+    why_fseek(fp, 0, SEEK_SET);
+    if (file_size <= 0 || file_size > 16384) {
+        why_fclose(fp);
+        return 0;
+    }
+
+    char *content = why_malloc(file_size + 1);
+    if (!content) {
+        why_fclose(fp);
+        return 0;
+    }
+    why_fread(content, 1, file_size, fp);
+    content[file_size] = '\0';
+    why_fclose(fp);
+
+    cJSON *json = cJSON_Parse(content);
+    why_free(content);
+    if (!json)
+        return 0;
+
+    size_t stack_size = 0;
+    cJSON *item       = cJSON_GetObjectItem(json, "stack_size");
+    if (item && cJSON_IsNumber(item) && item->valuedouble > 0) {
+        double v   = item->valuedouble;
+        stack_size = v > 65535.0 ? 65535 : (size_t)v;
+    }
+    cJSON_Delete(json);
+    return stack_size;
+}
+
 pid_t application_launch(char const *unique_identifier) {
     if (!unique_identifier) {
         return -1;
@@ -587,8 +636,10 @@ pid_t application_launch(char const *unique_identifier) {
         return -1;
     }
 
-    ESP_LOGI(TAG, "Attempting to launch %s", binary_path);
-    pid_t ret = process_create(binary_path, 0, 0, NULL);
+    size_t stack_size = load_application_stack_size(unique_identifier);
+    ESP_LOGI(TAG, "Attempting to launch %s (stack %u%s)", binary_path, (unsigned)stack_size,
+             stack_size ? "" : " = default");
+    pid_t ret = process_create(binary_path, stack_size, 0, NULL);
     why_free(binary_path);
     return ret;
 }
