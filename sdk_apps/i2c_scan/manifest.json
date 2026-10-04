@@ -1,0 +1,10 @@
+{
+    "unique_identifier": "i2c_scan",
+    "name": "I2C Scan",
+    "author": "Tjaap",
+    "version": "1",
+    "interpreter": "",
+    "metadata_file": "",
+    "binary_path": "i2c_scan.elf",
+    "source": 1
+}

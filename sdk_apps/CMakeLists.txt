@@ -278,6 +278,8 @@ build_app(bmi270_test
 build_app(curl_test PREINSTALL
     SOURCES
      curl_test.c
+    LIBRARIES
+     sdl3
 )
 
 build_app(framebuffer_test
@@ -288,6 +290,13 @@ build_app(framebuffer_test
 build_app(hello PREINSTALL
     SOURCES 
      main.c
+)
+
+build_app(i2c_scan PREINSTALL
+    SOURCES
+     i2c_scan.c
+    LIBRARIES
+     sdl3
 )
 
 build_app(process_test PREINSTALL
