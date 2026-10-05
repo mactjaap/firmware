@@ -50,6 +50,9 @@
 
 * esp_http_client (From esp-idf v5.5)
   - use why_io_port to switch all allocations to task context
+  - esp_http_client_fetch_headers(): log a read timeout at debug level instead of warning
+    - BadgeVMS curl waits for headers in short steps (to call the progress callback),
+      so a timeout there is normal and not worth a warning
 
 * esp-tls (From esp-idf v5.5)
   - use why_io_port to switch all allocations to task context

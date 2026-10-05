@@ -19,10 +19,15 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_tls_errors.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "miniz.h" /* esp_rom: tinfl_decompress() is in the ESP32-P4 ROM */
 #include "task.h"
 #include "thirdparty/dlmalloc.h"
 #include "why_io.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,7 +84,44 @@ struct curl_handle {
     bool verbose;
     bool ssl_verify_peer;
     long http_auth;
+
+    /* 4.3: progress callback */
+    curl_xferinfo_callback xferinfo_function;
+    void                  *xferinfo_data;
+    bool                   noprogress; /* libcurl default: 1 (no progress calls) */
+
+    /* 4.3: redirects are followed here, not by esp_http_client */
+    bool follow_location;
+    long max_redirs;
+    long redirect_count;
+
+    /* 4.3: timeouts.  total_timeout_ms is only set by CURLOPT_TIMEOUT(_MS);
+     * without it a transfer may take as long as data keeps arriving. */
+    long total_timeout_ms;
+    long idle_timeout_ms;
+
+    /* 4.3: Accept-Encoding / transparent gzip+deflate decoding */
+    char *accept_encoding;
+
+    /* 4.3: per-transfer state */
+    int64_t size_download;   /* body bytes received (before decoding) */
+    char   *location;        /* Location header of the current response */
+    int     content_encoding;
+    bool    server_closes;   /* "Connection: close" in the current response */
+
+    /* 4.3: connection reuse.  The esp_http_client (and its TCP/TLS
+     * connection) stays alive between curl_easy_perform() calls on the same
+     * handle while the server allows it, as libcurl does. */
+    bool  conn_alive;        /* a connection from an earlier request is open */
+    bool  recreate_client;   /* an option changed that esp_http_client only reads at init */
+    char *conn_origin;       /* "scheme://host:port" of the open connection */
+    char *sent_header_keys;  /* request headers set by the previous perform, '\n' separated */
+    bool  auto_content_type; /* Content-Type was added for a request body */
+    bool  custom_request;    /* CURLOPT_CUSTOMREQUEST chose the method */
+    bool  own_cookie_header; /* the application set a "Cookie:" header */
 };
+
+enum { CONTENT_ENCODING_NONE = 0, CONTENT_ENCODING_GZIP, CONTENT_ENCODING_DEFLATE };
 
 static size_t default_write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
@@ -112,7 +154,51 @@ static void free_all_cookies(cookie_entry_t *cookies) {
     }
 }
 
-static cookie_entry_t *parse_set_cookie(char const *set_cookie_header) {
+/* Lower-case host of url ("https://user@Host:8443/x" -> "host"), dlmalloc'd. */
+static char *curl_url_host(char const *url) {
+    char const *p = url ? strstr(url, "://") : NULL;
+    if (!p)
+        return NULL;
+    p += 3;
+    size_t      n  = strcspn(p, "/?#");
+    char const *at = memchr(p, '@', n);
+    if (at) {
+        n -= (size_t)(at + 1 - p);
+        p  = at + 1;
+    }
+    size_t host_len = n;
+    if (n && p[0] == '[') {
+        char const *close = memchr(p, ']', n);
+        host_len          = close ? (size_t)(close - p + 1) : n;
+    } else {
+        char const *colon = memchr(p, ':', n);
+        if (colon)
+            host_len = (size_t)(colon - p);
+    }
+    char *host = dlmalloc(host_len + 1);
+    if (!host)
+        return NULL;
+    for (size_t i = 0; i < host_len; i++) host[i] = (char)tolower((unsigned char)p[i]);
+    host[host_len] = 0;
+    return host;
+}
+
+/* Does a cookie for domain go to host?  Same host, or a subdomain of it.
+ * "example.com" is what BadgeVMS before 4.3 stored for every cookie (it did
+ * not know the host): such cookies from old jar files go everywhere, as before. */
+static bool cookie_domain_matches(char const *domain, char const *host) {
+    if (!domain || !*domain || strcmp(domain, "example.com") == 0)
+        return true;
+    if (!host)
+        return false;
+    while (*domain == '.') domain++;
+    size_t dl = strlen(domain), hl = strlen(host);
+    if (hl == dl)
+        return strcasecmp(host, domain) == 0;
+    return hl > dl && host[hl - dl - 1] == '.' && strcasecmp(host + hl - dl, domain) == 0;
+}
+
+static cookie_entry_t *parse_set_cookie(char const *set_cookie_header, char const *request_host) {
     if (!set_cookie_header) {
         ESP_LOGW(TAG, "No cookie header");
         return NULL;
@@ -177,7 +263,7 @@ static cookie_entry_t *parse_set_cookie(char const *set_cookie_header) {
         return NULL;
     }
 
-    cookie->domain    = why_strdup("example.com");
+    cookie->domain    = why_strdup(request_host && *request_host ? request_host : "example.com");
     cookie->path      = why_strdup("/");
     cookie->expires   = 0;
     cookie->secure    = false;
@@ -230,6 +316,12 @@ static cookie_entry_t *parse_set_cookie(char const *set_cookie_header) {
                 }
 
                 if (strcasecmp(attr_name, "domain") == 0) {
+                    if (request_host && *request_host && !cookie_domain_matches(attr_value, request_host)) {
+                        ESP_LOGW(TAG, "Cookie domain %s does not match %s: ignored", attr_value, request_host);
+                        dlfree(header_copy);
+                        free_cookie(cookie);
+                        return NULL;
+                    }
                     dlfree(cookie->domain);
                     cookie->domain = why_strdup(attr_value);
                     if (!cookie->domain) {
@@ -311,7 +403,8 @@ static void add_cookie(curl_handle_t *curl, cookie_entry_t *new_cookie) {
 
     cookie_entry_t **current = &curl->cookies;
     while (*current) {
-        if (strcmp((*current)->name, new_cookie->name) == 0) {
+        if (strcmp((*current)->name, new_cookie->name) == 0 &&
+            strcasecmp((*current)->domain ? (*current)->domain : "", new_cookie->domain ? new_cookie->domain : "") == 0) {
             cookie_entry_t *to_remove = *current;
             *current                  = (*current)->next;
             free_cookie(to_remove);
@@ -324,49 +417,46 @@ static void add_cookie(curl_handle_t *curl, cookie_entry_t *new_cookie) {
     curl->cookies    = new_cookie;
 }
 
-static char *build_cookie_header(curl_handle_t *curl) {
-    if (!curl->cookies && !curl->manual_cookies)
-        return NULL;
+/* Cookie header for a request to url: CURLOPT_COOKIE plus the stored
+ * cookies for that host.  Stored cookies are left out when the application
+ * sends its own "Cookie:" header (it manages cookies itself). */
+static char *build_cookie_header(curl_handle_t *curl, char const *url, bool use_store) {
+    char  *host      = use_store ? curl_url_host(url) : NULL;
+    time_t now       = time(NULL);
+    size_t total_len = curl->manual_cookies ? strlen(curl->manual_cookies) : 0;
 
-    size_t total_len = 0;
-    char  *result    = NULL;
-
-    if (curl->manual_cookies) {
-        total_len += strlen(curl->manual_cookies);
+    for (int pass = 0; pass < 2; pass++) {
+        char *result = NULL;
+        if (pass == 1) {
+            if (total_len == 0)
+                break;
+            result = dlmalloc(total_len + 1);
+            if (!result)
+                break;
+            result[0] = 0;
+            if (curl->manual_cookies)
+                strcat(result, curl->manual_cookies);
+        }
+        for (cookie_entry_t *c = use_store ? curl->cookies : NULL; c; c = c->next) {
+            if (!cookie_domain_matches(c->domain, host) || (c->expires > 0 && c->expires < now))
+                continue;
+            if (pass == 0) {
+                total_len += (total_len ? 2 : 0) + strlen(c->name) + 1 + strlen(c->value);
+            } else {
+                if (result[0])
+                    strcat(result, "; ");
+                strcat(result, c->name);
+                strcat(result, "=");
+                strcat(result, c->value);
+            }
+        }
+        if (pass == 1) {
+            dlfree(host);
+            return result;
+        }
     }
-
-    cookie_entry_t *cookie = curl->cookies;
-    while (cookie) {
-        if (total_len > 0)
-            total_len += 2;                                            // "; "
-        total_len += strlen(cookie->name) + 1 + strlen(cookie->value); // name=value
-        cookie     = cookie->next;
-    }
-
-    if (total_len == 0)
-        return NULL;
-
-    result = dlmalloc(total_len + 1);
-    if (!result)
-        return NULL;
-
-    result[0] = '\0';
-
-    if (curl->manual_cookies) {
-        strcat(result, curl->manual_cookies);
-    }
-
-    cookie = curl->cookies;
-    while (cookie) {
-        if (strlen(result) > 0)
-            strcat(result, "; ");
-        strcat(result, cookie->name);
-        strcat(result, "=");
-        strcat(result, cookie->value);
-        cookie = cookie->next;
-    }
-
-    return result;
+    dlfree(host);
+    return NULL;
 }
 
 static int load_cookies_from_file(curl_handle_t *curl, char const *filename) {
@@ -508,20 +598,37 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
             break;
 
         case HTTP_EVENT_ON_HEADER:
-            /* Remember Content-Type for CURLINFO_CONTENT_TYPE. */
-            if (evt->header_key && evt->header_value &&
-                strcasecmp(evt->header_key, "Content-Type") == 0) {
-                dlfree(curl->content_type);
-                curl->content_type = why_strdup(evt->header_value);
-            }
+            if (evt->header_key && evt->header_value) {
+                char const *key   = evt->header_key;
+                char const *value = evt->header_value;
 
-            if (evt->header_key) {
-                if (strncasecmp(evt->header_key, "Set-Cookie", 10) == 0) {
-                    if (evt->header_value) {
-                        cookie_entry_t *cookie = parse_set_cookie(evt->header_value);
-                        if (cookie) {
-                            add_cookie(curl, cookie);
-                        }
+                if (strcasecmp(key, "Content-Type") == 0) {
+                    /* Remember Content-Type for CURLINFO_CONTENT_TYPE. */
+                    dlfree(curl->content_type);
+                    curl->content_type = why_strdup(value);
+                } else if (strcasecmp(key, "Location") == 0) {
+                    dlfree(curl->location);
+                    curl->location = why_strdup(value);
+                } else if (strcasecmp(key, "Content-Encoding") == 0) {
+                    if (strcasecmp(value, "gzip") == 0 || strcasecmp(value, "x-gzip") == 0) {
+                        curl->content_encoding = CONTENT_ENCODING_GZIP;
+                    } else if (strcasecmp(value, "deflate") == 0) {
+                        curl->content_encoding = CONTENT_ENCODING_DEFLATE;
+                    } else {
+                        curl->content_encoding = CONTENT_ENCODING_NONE;
+                    }
+                } else if (strcasecmp(key, "Connection") == 0) {
+                    if (strcasecmp(value, "close") == 0) {
+                        curl->server_closes = true;
+                    }
+                } else if (strcasecmp(key, "Set-Cookie") == 0) {
+                    /* Cookies are kept per handle (as BadgeVMS always did) and
+                     * sent back only to the host that set them (4.3). */
+                    char           *host   = curl_url_host(curl->effective_url);
+                    cookie_entry_t *cookie = parse_set_cookie(value, host);
+                    dlfree(host);
+                    if (cookie) {
+                        add_cookie(curl, cookie);
                     }
                 }
             }
@@ -545,22 +652,11 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
             break;
 
         case HTTP_EVENT_ON_DATA:
-            if (curl->write_function) {
-                curl->write_function(evt->data, 1, evt->data_len, curl->write_data);
-            }
+            /* The body is read with esp_http_client_read() in
+             * curl_easy_perform(), which can stop the transfer. */
             break;
 
         case HTTP_EVENT_ON_FINISH:
-            curl->response_code  = esp_http_client_get_status_code(curl->esp_client);
-            curl->content_length = esp_http_client_get_content_length(curl->esp_client);
-            if (curl->verbose) {
-                ESP_LOGI(
-                    TAG,
-                    "HTTP_EVENT_ON_FINISH, status=%d, content_length=%lld",
-                    curl->response_code,
-                    curl->content_length
-                );
-            }
             break;
 
         case HTTP_EVENT_DISCONNECTED:
@@ -601,6 +697,12 @@ CURL *curl_easy_init(void) {
     curl->proxy_auth = CURLAUTH_BASIC;
     curl->http_auth  = CURLAUTH_BASIC;
 
+    curl->noprogress       = true;
+    curl->follow_location  = false;
+    curl->max_redirs       = 20;
+    curl->total_timeout_ms = 0;
+    curl->idle_timeout_ms  = 30000;
+
     return (CURL *)curl;
 }
 
@@ -625,18 +727,23 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
             char const *agent = va_arg(args, char const *);
             dlfree((void *)curl->config.user_agent);
             curl->config.user_agent = why_strdup(agent);
+            curl->recreate_client   = true;
             break;
         }
 
         case CURLOPT_TIMEOUT: {
             long timeout            = va_arg(args, long);
-            curl->config.timeout_ms = timeout * 1000;
+            curl->config.timeout_ms = timeout > 0 ? timeout * 1000 : 30000;
+            curl->total_timeout_ms  = timeout > 0 ? timeout * 1000 : 0;
+            curl->idle_timeout_ms   = curl->config.timeout_ms;
             break;
         }
 
         case CURLOPT_TIMEOUT_MS: {
             long timeout_ms         = va_arg(args, long);
-            curl->config.timeout_ms = timeout_ms;
+            curl->config.timeout_ms = timeout_ms > 0 ? timeout_ms : 30000;
+            curl->total_timeout_ms  = timeout_ms > 0 ? timeout_ms : 0;
+            curl->idle_timeout_ms   = curl->config.timeout_ms;
             break;
         }
 
@@ -650,6 +757,7 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
                 curl->config.crt_bundle_attach           = NULL;
                 curl->config.skip_cert_common_name_check = true;
             }
+            curl->recreate_client = true;
             break;
         }
 
@@ -660,6 +768,7 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
             } else {
                 curl->config.skip_cert_common_name_check = false;
             }
+            curl->recreate_client = true;
             break;
         }
 
@@ -669,6 +778,7 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
             dlfree((void *)curl->config.cert_pem);
             curl->config.cert_pem          = why_strdup(ca_file);
             curl->config.crt_bundle_attach = NULL;
+            curl->recreate_client          = true;
             break;
         }
 
@@ -684,14 +794,55 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
                 curl->config.password = why_strdup(colon + 1);
             }
             dlfree(userpwd_copy);
+            curl->recreate_client = true;
             break;
         }
 
         case CURLOPT_POSTFIELDS: {
             char const *data = va_arg(args, char const *);
             dlfree(curl->post_data);
-            curl->post_data      = why_strdup(data);
-            curl->post_data_size = strlen(data);
+            curl->post_data      = data ? why_strdup(data) : NULL;
+            curl->post_data_size = data ? strlen(data) : 0;
+            /* As in libcurl, POSTFIELDS makes the request a POST (unless
+             * CURLOPT_CUSTOMREQUEST chose another method, e.g. PUT). */
+            if (data && !curl->custom_request)
+                curl->config.method = HTTP_METHOD_POST;
+            break;
+        }
+
+        case CURLOPT_COOKIELIST: {
+            char const *cmd = va_arg(args, char const *);
+            if (!cmd)
+                break;
+            if (strcasecmp(cmd, "ALL") == 0) {
+                free_all_cookies(curl->cookies);
+                curl->cookies = NULL;
+            } else if (strcasecmp(cmd, "SESS") == 0) {
+                cookie_entry_t **c = &curl->cookies;
+                while (*c) {
+                    if ((*c)->expires == 0) {
+                        cookie_entry_t *gone = *c;
+                        *c                   = gone->next;
+                        free_cookie(gone);
+                    } else {
+                        c = &(*c)->next;
+                    }
+                }
+            } else if (strcasecmp(cmd, "FLUSH") == 0) {
+                if (curl->cookie_jar)
+                    save_cookies_to_file(curl, curl->cookie_jar);
+            } else if (strcasecmp(cmd, "RELOAD") == 0) {
+                if (curl->cookie_file)
+                    load_cookies_from_file(curl, curl->cookie_file);
+            } else if (strncasecmp(cmd, "Set-Cookie:", 11) == 0) {
+                char           *host   = curl_url_host(curl->config.url);
+                cookie_entry_t *cookie = parse_set_cookie(cmd + 11, host);
+                dlfree(host);
+                if (cookie)
+                    add_cookie(curl, cookie);
+            } else {
+                ESP_LOGW(TAG, "CURLOPT_COOKIELIST: unsupported command '%s'", cmd);
+            }
             break;
         }
 
@@ -734,19 +885,46 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
         case CURLOPT_FOLLOWLOCATION: {
             long follow = va_arg(args, long);
             /*
-             * esp_http_client treats max_redirection_count == 0 as "use the
-             * default (10)", so 0 alone never stopped redirects.  With
+             * Redirects are followed by curl_easy_perform() itself.  With
              * FOLLOWLOCATION 0 the 3xx response (and its Location header) is
              * returned to the caller, as in libcurl.
              */
-            curl->config.disable_auto_redirect = !follow;
-            curl->config.max_redirection_count = follow ? 10 : 0;
+            curl->follow_location              = follow != 0;
+            curl->config.disable_auto_redirect = true;
             break;
         }
 
         case CURLOPT_MAXREDIRS: {
-            long max_redirs                    = va_arg(args, long);
-            curl->config.max_redirection_count = max_redirs;
+            long max_redirs  = va_arg(args, long);
+            curl->max_redirs = max_redirs < 0 ? 50 : max_redirs;
+            break;
+        }
+
+        case CURLOPT_NOPROGRESS: {
+            long noprogress  = va_arg(args, long);
+            curl->noprogress = noprogress != 0;
+            break;
+        }
+
+        case CURLOPT_XFERINFOFUNCTION: {
+            curl->xferinfo_function = va_arg(args, curl_xferinfo_callback);
+            break;
+        }
+
+        case CURLOPT_XFERINFODATA: {
+            curl->xferinfo_data = va_arg(args, void *);
+            break;
+        }
+
+        case CURLOPT_ACCEPT_ENCODING: {
+            /* NULL: no Accept-Encoding and no decoding.  "" (all supported)
+             * or a list with gzip/deflate: send it and decode the body. */
+            char const *encoding = va_arg(args, char const *);
+            dlfree(curl->accept_encoding);
+            curl->accept_encoding = NULL;
+            if (encoding) {
+                curl->accept_encoding = why_strdup(encoding[0] ? encoding : "gzip, deflate");
+            }
             break;
         }
 
@@ -758,6 +936,11 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
 
         case CURLOPT_CUSTOMREQUEST: {
             char const *method  = va_arg(args, char const *);
+            curl->custom_request = method != NULL;
+            if (!method) {
+                curl->config.method = curl->post_data ? HTTP_METHOD_POST : HTTP_METHOD_GET;
+                break;
+            }
             curl->config.method = HTTP_METHOD_GET;
             if (strcmp(method, "GET") == 0)
                 curl->config.method = HTTP_METHOD_GET;
@@ -793,7 +976,8 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
         case CURLOPT_HTTPGET: {
             long get = va_arg(args, long);
             if (get) {
-                curl->config.method = HTTP_METHOD_GET;
+                curl->config.method  = HTTP_METHOD_GET;
+                curl->custom_request = false;
             }
             break;
         }
@@ -831,7 +1015,7 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
         case CURLOPT_BUFFERSIZE: {
             long size                = va_arg(args, long);
             curl->config.buffer_size = size;
-            va_end(args);
+            curl->recreate_client    = true;
             break;
         }
 
@@ -909,71 +1093,710 @@ CURLcode curl_easy_setopt(CURL *curl_handle, CURLoption option, ...) {
     return CURLE_OK;
 }
 
+/* ---------- 4.3: curl_easy_perform() on the native esp_http_client API ----------
+ *
+ * esp_http_client_perform() delivers the body through HTTP_EVENT_ON_DATA and
+ * ignores what the event handler returns, so a transfer could not be stopped,
+ * did not report progress and always closed its connection.  The request is
+ * now driven with esp_http_client_open() / fetch_headers() / read(), which
+ * lets curl_easy_perform():
+ *   - honour the write callback: returning less than the size given stops
+ *     the transfer with CURLE_WRITE_ERROR (as in libcurl);
+ *   - call CURLOPT_XFERINFOFUNCTION at least twice a second, also while it
+ *     waits for the server; non-zero stops with CURLE_ABORTED_BY_CALLBACK;
+ *   - follow redirects itself and report the final URL (CURLINFO_EFFECTIVE_URL);
+ *   - keep the connection open for the next request on the same handle
+ *     (same scheme, host and port), unless the server closes it;
+ *   - decode "Content-Encoding: gzip/deflate" when CURLOPT_ACCEPT_ENCODING
+ *     is set, with the inflater in the ESP32-P4 ROM;
+ *   - tell DNS, connect, TLS and timeout failures apart.
+ */
+
+#define CURL_POLL_MS        500   /* longest wait without a progress call */
+#define CURL_READ_CHUNK     4096
+#define CURL_DRAIN_MAX      (64 * 1024)
+
+typedef struct {
+    tinfl_decompressor decomp;
+    uint8_t            dict[TINFL_LZ_DICT_SIZE];
+    size_t             dict_ofs;
+    bool               zlib;       /* deflate with a zlib header */
+    bool               done;
+    uint8_t            first[2];   /* "deflate": first bytes, to detect a zlib header */
+    /* gzip header parser */
+    int      gz_pos;               /* bytes of the fixed 10-byte header seen */
+    uint8_t  gz_flags;
+    int      gz_stage;             /* 0 fixed, 1 extra len, 2 extra, 3 name, 4 comment, 5 hcrc, 6 data */
+    uint32_t gz_skip;
+    int      encoding;
+} curl_inflate_t;
+
+static uint32_t curl_now_ms(void) {
+    return (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
+}
+
+/* "https://host:443" for url, so a kept connection is only reused for the
+ * same scheme, host and port. */
+static char *curl_url_origin(char const *url) {
+    if (!url)
+        return NULL;
+    char const *sep = strstr(url, "://");
+    if (!sep)
+        return NULL;
+    size_t scheme_len = (size_t)(sep - url);
+    char const *host  = sep + 3;
+    size_t host_len   = strcspn(host, "/?#");
+    char const *at    = memchr(host, '@', host_len);
+    if (at) {
+        host_len -= (size_t)(at + 1 - host);
+        host = at + 1;
+    }
+    bool has_port = false;
+    if (host_len && host[0] == '[') {
+        char const *close = memchr(host, ']', host_len);
+        has_port          = close && (size_t)(close - host + 1) < host_len;
+    } else {
+        has_port = memchr(host, ':', host_len) != NULL;
+    }
+    bool https = scheme_len == 5 && strncasecmp(url, "https", 5) == 0;
+    char *out  = dlmalloc(scheme_len + 3 + host_len + 8);
+    if (!out)
+        return NULL;
+    size_t n = 0;
+    for (size_t i = 0; i < scheme_len; i++) out[n++] = (char)tolower((unsigned char)url[i]);
+    memcpy(out + n, "://", 3);
+    n += 3;
+    for (size_t i = 0; i < host_len; i++) out[n++] = (char)tolower((unsigned char)host[i]);
+    out[n] = 0;
+    if (!has_port)
+        strcat(out, https ? ":443" : ":80");
+    return out;
+}
+
+/* Resolve a Location header against the URL it came from. */
+static char *curl_resolve_location(char const *base, char const *location) {
+    if (!location || !*location)
+        return NULL;
+    while (*location == ' ' || *location == '\t') location++;
+
+    /* Absolute ("https://..."): a scheme is a letter followed by letters,
+     * digits, '+', '-' or '.', then ':'. */
+    if (isalpha((unsigned char)location[0])) {
+        char const *p = location + 1;
+        while (isalnum((unsigned char)*p) || *p == '+' || *p == '-' || *p == '.') p++;
+        if (*p == ':')
+            return why_strdup(location);
+    }
+
+    char const *sep = base ? strstr(base, "://") : NULL;
+    if (!sep)
+        return why_strdup(location);
+    size_t scheme_len = (size_t)(sep - base);
+    char const *host  = sep + 3;
+    size_t host_len   = strcspn(host, "/?#");
+
+    size_t authority_end = (size_t)(host + host_len - base);
+    size_t path_end      = authority_end + strcspn(host + host_len, "?#");
+
+    size_t prefix_len;
+    if (location[0] == '?') {
+        prefix_len = path_end; /* same path, new query */
+    } else if (location[0] == '#') {
+        prefix_len = authority_end + strcspn(host + host_len, "#");
+    } else if (location[0] == '/' && location[1] == '/') {
+        prefix_len = scheme_len + 1; /* "https:" + "//host/x" */
+    } else if (location[0] == '/') {
+        prefix_len = authority_end;
+    } else {
+        /* Relative path: keep the base up to its last '/' (before ? or #). */
+        prefix_len = authority_end;
+        for (size_t i = path_end; i > prefix_len; i--) {
+            if (base[i - 1] == '/') {
+                prefix_len = i;
+                break;
+            }
+        }
+        if (prefix_len == authority_end) {
+            /* No path in the base: "http://host" + "/" + relative */
+            size_t len = prefix_len + 1 + strlen(location) + 1;
+            char  *out = dlmalloc(len);
+            if (out)
+                snprintf(out, len, "%.*s/%s", (int)prefix_len, base, location);
+            return out;
+        }
+    }
+    size_t len = prefix_len + strlen(location) + 1;
+    char  *out = dlmalloc(len);
+    if (out)
+        snprintf(out, len, "%.*s%s", (int)prefix_len, base, location);
+    return out;
+}
+
+/* Map an esp_http_client error to a curl code, using the transport's last
+ * TLS/socket error when there is one. */
+static CURLcode curl_map_error(curl_handle_t *curl, esp_err_t err, CURLcode fallback) {
+    int       tls_code  = 0;
+    int       tls_flags = 0;
+    esp_err_t last      = esp_http_client_get_and_clear_last_tls_error(curl->esp_client, &tls_code, &tls_flags);
+
+    if (curl->verbose) {
+        ESP_LOGI(TAG, "transfer error %s (tls: %s, code -0x%x, flags 0x%x)", esp_err_to_name(err),
+                 esp_err_to_name(last), -tls_code, tls_flags);
+    }
+
+    switch (last) {
+        case ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME: return CURLE_COULDNT_RESOLVE_HOST;
+        case ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT:
+        case ESP_ERR_ESP_TLS_SERVER_HANDSHAKE_TIMEOUT: return CURLE_OPERATION_TIMEDOUT;
+        case ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET:
+        case ESP_ERR_ESP_TLS_UNSUPPORTED_PROTOCOL_FAMILY:
+        case ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST: return CURLE_COULDNT_CONNECT;
+        case ESP_ERR_ESP_TLS_TCP_CLOSED_FIN: return CURLE_RECV_ERROR;
+        case ESP_ERR_MBEDTLS_SSL_HANDSHAKE_FAILED:
+            /* Non-zero flags: the certificate did not verify. */
+            return tls_flags ? CURLE_SSL_PEER_CERTIFICATE : CURLE_SSL_CONNECT_ERROR;
+        case ESP_ERR_MBEDTLS_CERT_PARTLY_OK:
+        case ESP_ERR_MBEDTLS_CTR_DRBG_SEED_FAILED:
+        case ESP_ERR_MBEDTLS_SSL_SET_HOSTNAME_FAILED:
+        case ESP_ERR_MBEDTLS_SSL_CONFIG_DEFAULTS_FAILED:
+        case ESP_ERR_MBEDTLS_SSL_CONF_ALPN_PROTOCOLS_FAILED:
+        case ESP_ERR_MBEDTLS_X509_CRT_PARSE_FAILED:
+        case ESP_ERR_MBEDTLS_SSL_CONF_OWN_CERT_FAILED:
+        case ESP_ERR_MBEDTLS_SSL_SETUP_FAILED:
+        case ESP_ERR_MBEDTLS_SSL_WRITE_FAILED: return CURLE_SSL_CONNECT_ERROR;
+        default: break;
+    }
+
+    switch (err) {
+        case ESP_ERR_TIMEOUT:
+        case -ESP_ERR_HTTP_EAGAIN:
+        case ESP_ERR_HTTP_EAGAIN: return CURLE_OPERATION_TIMEDOUT;
+        case ESP_ERR_HTTP_CONNECT: return CURLE_COULDNT_CONNECT;
+        case ESP_ERR_HTTP_WRITE_DATA: return CURLE_SEND_ERROR;
+        case ESP_ERR_HTTP_FETCH_HEADER:
+        case ESP_ERR_HTTP_CONNECTION_CLOSED: return CURLE_RECV_ERROR;
+        case ESP_ERR_HTTP_INVALID_TRANSPORT: return CURLE_UNSUPPORTED_PROTOCOL;
+        case ESP_ERR_NO_MEM: return CURLE_OUT_OF_MEMORY;
+        default: return fallback;
+    }
+}
+
+static void curl_close_connection(curl_handle_t *curl) {
+    if (curl->esp_client)
+        esp_http_client_close(curl->esp_client);
+    curl->conn_alive = false;
+    dlfree(curl->conn_origin);
+    curl->conn_origin = NULL;
+}
+
+/* Progress call; true = the application asked to stop. */
+static bool curl_progress(curl_handle_t *curl, int64_t ultotal, int64_t ulnow) {
+    if (curl->noprogress || !curl->xferinfo_function)
+        return false;
+    int64_t total = curl->content_length > 0 ? curl->content_length : 0;
+    return curl->xferinfo_function(curl->xferinfo_data, total, curl->size_download, ultotal, ulnow) != 0;
+}
+
+/* Hand body bytes to the write callback; false = it took fewer bytes. */
+static bool curl_deliver(curl_handle_t *curl, char *data, size_t len) {
+    if (!len || !curl->write_function)
+        return true;
+    return curl->write_function(data, 1, len, curl->write_data) == len;
+}
+
+/* Run deflate data through the ROM inflater; output goes to the write callback. */
+static CURLcode curl_inflate_run(curl_handle_t *curl, curl_inflate_t *z, uint8_t const *in, size_t len) {
+    while (!z->done) {
+        size_t    in_size  = len;
+        size_t    out_size = TINFL_LZ_DICT_SIZE - z->dict_ofs;
+        mz_uint32 flags    = TINFL_FLAG_HAS_MORE_INPUT | (z->zlib ? TINFL_FLAG_PARSE_ZLIB_HEADER : 0);
+        tinfl_status status =
+            tinfl_decompress(&z->decomp, in, &in_size, z->dict, z->dict + z->dict_ofs, &out_size, flags);
+        in  += in_size;
+        len -= in_size;
+        if (out_size) {
+            if (!curl_deliver(curl, (char *)z->dict + z->dict_ofs, out_size))
+                return CURLE_WRITE_ERROR;
+            z->dict_ofs = (z->dict_ofs + out_size) & (TINFL_LZ_DICT_SIZE - 1);
+        }
+        if (status == TINFL_STATUS_DONE) {
+            z->done = true; /* the gzip trailer (CRC, size) is ignored */
+            break;
+        }
+        if (status < 0)
+            return CURLE_BAD_CONTENT_ENCODING;
+        if (status == TINFL_STATUS_NEEDS_MORE_INPUT && len == 0)
+            break;
+        if (in_size == 0 && out_size == 0 && status != TINFL_STATUS_HAS_MORE_OUTPUT)
+            break; /* no progress possible */
+    }
+    return CURLE_OK;
+}
+
+/* Feed compressed body bytes (gzip or deflate). */
+static CURLcode curl_inflate_feed(curl_handle_t *curl, curl_inflate_t *z, uint8_t const *in, size_t len) {
+    if (z->encoding == CONTENT_ENCODING_DEFLATE && z->gz_stage < 6) {
+        /* "deflate" is meant to be zlib-wrapped, but some servers send raw
+         * deflate: look at the first two bytes for a valid zlib header. */
+        while (z->gz_pos < 2 && len) {
+            z->first[z->gz_pos++] = *in++;
+            len--;
+        }
+        if (z->gz_pos < 2)
+            return CURLE_OK;
+        z->zlib     = (z->first[0] & 0x0F) == 8 && ((z->first[0] << 8) | z->first[1]) % 31 == 0;
+        z->gz_stage = 6;
+        CURLcode rc = curl_inflate_run(curl, z, z->first, 2);
+        if (rc != CURLE_OK)
+            return rc;
+    }
+
+    /* gzip member header (RFC 1952) */
+    while (len && z->gz_stage < 6) {
+        uint8_t c = *in++;
+        len--;
+        switch (z->gz_stage) {
+            case 0:
+                if ((z->gz_pos == 0 && c != 0x1F) || (z->gz_pos == 1 && c != 0x8B) || (z->gz_pos == 2 && c != 8))
+                    return CURLE_BAD_CONTENT_ENCODING;
+                if (z->gz_pos == 3)
+                    z->gz_flags = c;
+                if (++z->gz_pos == 10) {
+                    z->gz_stage = (z->gz_flags & 4) ? 1 : 3;
+                    z->gz_pos   = 0;
+                }
+                break;
+            case 1: /* FEXTRA length, little endian */
+                z->gz_skip |= (uint32_t)c << (8 * z->gz_pos);
+                if (++z->gz_pos == 2)
+                    z->gz_stage = z->gz_skip ? 2 : 3;
+                break;
+            case 2:
+                if (--z->gz_skip == 0)
+                    z->gz_stage = 3;
+                break;
+            case 3: /* FNAME, zero terminated */
+                if (!(z->gz_flags & 8) || c == 0) {
+                    z->gz_stage = 4;
+                    if (!(z->gz_flags & 8)) {
+                        in--;
+                        len++;
+                    }
+                }
+                break;
+            case 4: /* FCOMMENT */
+                if (!(z->gz_flags & 16) || c == 0) {
+                    z->gz_stage = 5;
+                    z->gz_skip  = (z->gz_flags & 2) ? 2 : 0;
+                    if (!(z->gz_flags & 16)) {
+                        in--;
+                        len++;
+                    }
+                }
+                break;
+            case 5: /* FHCRC */
+                if (z->gz_skip == 0) {
+                    in--;
+                    len++;
+                    z->gz_stage = 6;
+                } else if (--z->gz_skip == 0) {
+                    z->gz_stage = 6;
+                }
+                break;
+        }
+    }
+    if (z->gz_stage < 6 || !len)
+        return CURLE_OK;
+    return curl_inflate_run(curl, z, in, len);
+}
+
+/* Remove the request headers the previous perform set on a reused client. */
+static void curl_forget_request_headers(curl_handle_t *curl) {
+    if (!curl->sent_header_keys)
+        return;
+    char *p = curl->sent_header_keys;
+    while (*p) {
+        char *nl = strchr(p, '\n');
+        if (nl)
+            *nl = 0;
+        if (*p)
+            esp_http_client_delete_header(curl->esp_client, p);
+        if (!nl)
+            break;
+        p = nl + 1;
+    }
+    dlfree(curl->sent_header_keys);
+    curl->sent_header_keys = NULL;
+}
+
+static void curl_remember_header_key(curl_handle_t *curl, char const *key) {
+    size_t old_len = curl->sent_header_keys ? strlen(curl->sent_header_keys) : 0;
+    size_t key_len = strlen(key);
+    char  *keys    = dlrealloc(curl->sent_header_keys, old_len + key_len + 2);
+    if (!keys)
+        return;
+    memcpy(keys + old_len, key, key_len);
+    keys[old_len + key_len]     = '\n';
+    keys[old_len + key_len + 1] = 0;
+    curl->sent_header_keys      = keys;
+}
+
+static void curl_set_header(curl_handle_t *curl, char const *key, char const *value) {
+    if (value && *value) {
+        esp_http_client_set_header(curl->esp_client, key, value);
+    } else {
+        /* "Name:" with no value removes a header, as in libcurl. */
+        esp_http_client_delete_header(curl->esp_client, key);
+    }
+    curl_remember_header_key(curl, key);
+}
+
+static void curl_apply_request_headers(curl_handle_t *curl) {
+    curl_forget_request_headers(curl);
+    curl->auto_content_type = false;
+
+    if (curl->accept_encoding)
+        curl_set_header(curl, "Accept-Encoding", curl->accept_encoding);
+
+    bool own_cookie_header = false;
+    for (struct curl_slist *header = curl->headers; header; header = header->next) {
+        if (!header->data || !strchr(header->data, ':'))
+            continue;
+        if (strncasecmp(header->data, "Cookie:", 7) == 0)
+            own_cookie_header = true;
+        char *header_copy = why_strdup(header->data);
+        if (!header_copy)
+            continue;
+        char *colon = strchr(header_copy, ':');
+        *colon      = '\0';
+        char *value = colon + 1;
+        while (*value == ' ' || *value == '\t') value++;
+        curl_set_header(curl, header_copy, value);
+        dlfree(header_copy);
+    }
+
+    curl->own_cookie_header = own_cookie_header;
+}
+
+/* Cookie header for this hop (redirects can go to another host). */
+static void curl_apply_cookie_header(curl_handle_t *curl, char const *url) {
+    if (curl->own_cookie_header)
+        return; /* the application sends its own */
+    char *cookie_header = build_cookie_header(curl, url, true);
+    if (cookie_header) {
+        curl_set_header(curl, "Cookie", cookie_header);
+        dlfree(cookie_header);
+    } else {
+        esp_http_client_delete_header(curl->esp_client, "Cookie");
+    }
+}
+
+static bool curl_method_has_body(esp_http_client_method_t method) {
+    return method == HTTP_METHOD_POST || method == HTTP_METHOD_PUT || method == HTTP_METHOD_PATCH;
+}
+
+static bool curl_status_is_redirect(int status) {
+    return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+}
+
+/* Read and discard a (small) response body so the connection can be reused;
+ * closes the connection when that is not possible. */
+static void curl_drain_or_close(curl_handle_t *curl, char *buf) {
+    int total = 0;
+    while (curl->conn_alive && total < CURL_DRAIN_MAX) {
+        int n = esp_http_client_read(curl->esp_client, buf, CURL_READ_CHUNK);
+        if (n <= 0)
+            break;
+        total += n;
+    }
+    if (curl->server_closes || !esp_http_client_is_complete_data_received(curl->esp_client))
+        curl_close_connection(curl);
+}
+
+/* Wait for the response headers; progress calls every CURL_POLL_MS. */
+static CURLcode curl_fetch_headers(curl_handle_t *curl, uint32_t start_ms, int64_t post_len) {
+    uint32_t idle_since = curl_now_ms();
+    esp_http_client_set_timeout_ms(curl->esp_client, CURL_POLL_MS);
+    for (;;) {
+        int64_t r = esp_http_client_fetch_headers(curl->esp_client);
+        if (r >= 0)
+            return CURLE_OK;
+        if (r != -ESP_ERR_HTTP_EAGAIN)
+            return curl_map_error(curl, ESP_ERR_HTTP_FETCH_HEADER, CURLE_RECV_ERROR);
+
+        uint32_t now = curl_now_ms();
+        if (curl_progress(curl, post_len, post_len))
+            return CURLE_ABORTED_BY_CALLBACK;
+        if ((curl->total_timeout_ms > 0 && (int32_t)(now - start_ms) >= curl->total_timeout_ms) ||
+            (int32_t)(now - idle_since) >= curl->idle_timeout_ms)
+            return CURLE_OPERATION_TIMEDOUT;
+    }
+}
+
+/* Send the request and read the response headers, following redirects and
+ * a Basic/Digest authentication challenge.  On CURLE_OK the body is ready
+ * to be read. */
+static CURLcode curl_request(curl_handle_t *curl, uint32_t start_ms, char *buf) {
+    char const *url          = curl->config.url;
+    bool        retried      = false;
+    int         auth_retries = 0;
+    esp_http_client_method_t method = curl->config.method;
+
+    for (;;) {
+        /* A kept connection can only be reused for the same origin. */
+        char *origin = curl_url_origin(url);
+        if (curl->conn_alive && (!origin || !curl->conn_origin || strcmp(origin, curl->conn_origin) != 0))
+            curl_close_connection(curl);
+        if (esp_http_client_set_url(curl->esp_client, url) != ESP_OK) {
+            dlfree(origin);
+            return CURLE_URL_MALFORMAT;
+        }
+        esp_http_client_set_method(curl->esp_client, method);
+        curl_apply_cookie_header(curl, url);
+
+        bool        reused    = curl->conn_alive;
+        int64_t     post_len  = 0;
+        char const *post_data = NULL;
+        if (curl_method_has_body(method) && curl->post_data) {
+            post_data = curl->post_data;
+            post_len  = (int64_t)curl->post_data_size;
+        }
+        /* libcurl's default Content-Type for a request body. */
+        char *content_type = NULL;
+        esp_http_client_get_header(curl->esp_client, "Content-Type", &content_type);
+        if (post_data && !content_type) {
+            curl_set_header(curl, "Content-Type", "application/x-www-form-urlencoded");
+            curl->auto_content_type = true;
+        } else if (!post_data && curl->auto_content_type) {
+            esp_http_client_delete_header(curl->esp_client, "Content-Type");
+            curl->auto_content_type = false;
+        }
+
+        /* Per-response state */
+        curl->content_encoding = CONTENT_ENCODING_NONE;
+        curl->server_closes    = false;
+        curl->content_length   = 0;
+        dlfree(curl->location);
+        curl->location = NULL;
+        dlfree(curl->content_type); /* Content-Type is per response */
+        curl->content_type = NULL;
+        esp_http_client_get_and_clear_last_tls_error(curl->esp_client, NULL, NULL);
+
+        if (curl_progress(curl, post_len, 0)) {
+            dlfree(origin);
+            return CURLE_ABORTED_BY_CALLBACK;
+        }
+
+        /* Connect (if needed) and send the request line and headers with
+         * the configured timeout: DNS, TCP and TLS cannot be interrupted. */
+        esp_http_client_set_timeout_ms(curl->esp_client, curl->config.timeout_ms);
+        esp_err_t err = esp_http_client_open(curl->esp_client, (int)post_len);
+        if (err == ESP_OK && post_len > 0) {
+            int written = esp_http_client_write(curl->esp_client, post_data, (int)post_len);
+            if (written != (int)post_len)
+                err = ESP_ERR_HTTP_WRITE_DATA;
+        }
+
+        CURLcode rc = CURLE_OK;
+        if (err != ESP_OK) {
+            rc = curl_map_error(curl, err, CURLE_COULDNT_CONNECT);
+        } else {
+            curl->conn_alive = true;
+            dlfree(curl->conn_origin);
+            curl->conn_origin = origin;
+            origin            = NULL;
+            rc                = curl_fetch_headers(curl, start_ms, post_len);
+        }
+        dlfree(origin);
+
+        if (rc != CURLE_OK) {
+            curl_close_connection(curl);
+            /* A kept connection may have been closed by the server while it
+             * was idle: try once more on a new connection. */
+            if (reused && !retried && rc != CURLE_ABORTED_BY_CALLBACK && rc != CURLE_OPERATION_TIMEDOUT) {
+                retried = true;
+                if (curl->verbose)
+                    ESP_LOGI(TAG, "kept connection was closed, reconnecting");
+                continue;
+            }
+            return rc;
+        }
+        retried = false;
+
+        int status           = esp_http_client_get_status_code(curl->esp_client);
+        curl->response_code  = status;
+        curl->content_length = esp_http_client_get_content_length(curl->esp_client);
+
+        if (curl->follow_location && curl_status_is_redirect(status) && curl->location) {
+            if (curl->redirect_count >= curl->max_redirs)
+                return CURLE_TOO_MANY_REDIRECTS;
+            char *next = curl_resolve_location(curl->effective_url, curl->location);
+            if (!next)
+                return CURLE_OUT_OF_MEMORY;
+            if (strncasecmp(next, "http://", 7) != 0 && strncasecmp(next, "https://", 8) != 0) {
+                dlfree(next);
+                return CURLE_UNSUPPORTED_PROTOCOL;
+            }
+            curl_drain_or_close(curl, buf);
+            /* 303, and 301/302 after a POST, continue with GET (as browsers
+             * and libcurl do); 307/308 repeat the request as it was. */
+            if (status == 303 || ((status == 301 || status == 302) && method == HTTP_METHOD_POST))
+                method = HTTP_METHOD_GET;
+            if (curl->verbose)
+                ESP_LOGI(TAG, "redirect %d -> %s", status, next);
+            dlfree(curl->effective_url);
+            curl->effective_url = next;
+            url                 = next;
+            curl->redirect_count++;
+            continue;
+        }
+
+        if (status == 401 && curl->config.username && auth_retries == 0) {
+            if (esp_http_client_add_auth(curl->esp_client) == ESP_OK) {
+                auth_retries++;
+                curl_drain_or_close(curl, buf);
+                continue;
+            }
+        }
+        return CURLE_OK;
+    }
+}
+
+/* Read the response body into the write callback. */
+static CURLcode curl_read_body(curl_handle_t *curl, uint32_t start_ms, char *buf) {
+    curl_inflate_t *z = NULL;
+    if (curl->accept_encoding && curl->content_encoding != CONTENT_ENCODING_NONE) {
+        z = dlcalloc(1, sizeof(curl_inflate_t));
+        if (!z)
+            return CURLE_OUT_OF_MEMORY;
+        tinfl_init(&z->decomp);
+        z->encoding = curl->content_encoding;
+        z->gz_stage = 0;
+    }
+
+    CURLcode rc         = CURLE_OK;
+    uint32_t idle_since = curl_now_ms();
+    uint32_t next_call  = 0;
+    esp_http_client_set_timeout_ms(curl->esp_client, CURL_POLL_MS);
+
+    for (;;) {
+        int n = esp_http_client_read(curl->esp_client, buf, CURL_READ_CHUNK);
+        uint32_t now = curl_now_ms();
+
+        if (n > 0) {
+            idle_since = now;
+            curl->size_download += n;
+            rc = z ? curl_inflate_feed(curl, z, (uint8_t const *)buf, (size_t)n)
+                   : (curl_deliver(curl, buf, (size_t)n) ? CURLE_OK : CURLE_WRITE_ERROR);
+            if (rc != CURLE_OK)
+                break;
+        } else if (n == 0) {
+            if (!esp_http_client_is_complete_data_received(curl->esp_client) && curl->content_length > 0 &&
+                curl->size_download < curl->content_length) {
+                ESP_LOGW(TAG, "connection closed after %lld of %lld bytes", curl->size_download, curl->content_length);
+                rc = CURLE_PARTIAL_FILE;
+            }
+            break;
+        } else if (n != -ESP_ERR_HTTP_EAGAIN) {
+            rc = curl_map_error(curl, ESP_FAIL, CURLE_RECV_ERROR);
+            break;
+        }
+
+        /* Progress at least every CURL_POLL_MS, and on every chunk. */
+        if (n > 0 || (int32_t)(now - next_call) >= 0) {
+            next_call = now + CURL_POLL_MS;
+            if (curl_progress(curl, 0, 0)) {
+                rc = CURLE_ABORTED_BY_CALLBACK;
+                break;
+            }
+        }
+        if ((curl->total_timeout_ms > 0 && (int32_t)(now - start_ms) >= curl->total_timeout_ms) ||
+            (int32_t)(now - idle_since) >= curl->idle_timeout_ms) {
+            rc = CURLE_OPERATION_TIMEDOUT;
+            break;
+        }
+    }
+
+    if (z) {
+        if (rc == CURLE_OK && !z->done) {
+            ESP_LOGW(TAG, "compressed body ended early");
+            rc = CURLE_BAD_CONTENT_ENCODING;
+        }
+        dlfree(z);
+    }
+
+    /* Keep the connection only after a complete, cleanly ended response. */
+    if (rc != CURLE_OK || curl->server_closes || !esp_http_client_is_complete_data_received(curl->esp_client))
+        curl_close_connection(curl);
+    return rc;
+}
+
 CURLcode curl_easy_perform(CURL *curl_handle) {
     if (!curl_handle) {
         return CURLE_FAILED_INIT;
     }
 
     curl_handle_t *curl = (curl_handle_t *)curl_handle;
+    if (!curl->config.url || !curl->config.url[0]) {
+        return CURLE_URL_MALFORMAT;
+    }
 
-    curl->esp_client = esp_http_client_init(&curl->config);
+    /* Per-transfer results */
+    curl->response_code  = 0;
+    curl->content_length = 0;
+    curl->size_download  = 0;
+    curl->redirect_count = 0;
+    dlfree(curl->effective_url);
+    curl->effective_url = why_strdup(curl->config.url);
+
+    /* esp_http_client reads TLS, authentication and buffer settings only
+     * in esp_http_client_init(): start a new client when one changed. */
+    if (curl->esp_client && curl->recreate_client) {
+        curl_close_connection(curl);
+        esp_http_client_cleanup(curl->esp_client);
+        curl->esp_client = NULL;
+        dlfree(curl->sent_header_keys);
+        curl->sent_header_keys = NULL;
+    }
     if (!curl->esp_client) {
-        return CURLE_FAILED_INIT;
-    }
-
-    if (curl->headers) {
-        struct curl_slist *header = curl->headers;
-        while (header) {
-            char *colon = strchr(header->data, ':');
-            if (colon) {
-                char *header_copy = why_strdup(header->data);
-                char *colon_copy  = strchr(header_copy, ':');
-                *colon_copy       = '\0';
-
-                char *value = colon_copy + 1;
-                while (*value && (*value == ' ' || *value == '\t')) {
-                    value++;
-                }
-
-                esp_http_client_set_header(curl->esp_client, header_copy, value);
-                dlfree(header_copy);
-            }
-            header = header->next;
+        curl->esp_client = esp_http_client_init(&curl->config);
+        if (!curl->esp_client) {
+            return CURLE_FAILED_INIT;
         }
+        curl->conn_alive      = false;
+        curl->recreate_client = false;
     }
 
-    char *cookie_header = build_cookie_header(curl);
-    if (cookie_header) {
-        esp_http_client_set_header(curl->esp_client, "Cookie", cookie_header);
-        dlfree(cookie_header);
+    char *buf = dlmalloc(CURL_READ_CHUNK);
+    if (!buf) {
+        return CURLE_OUT_OF_MEMORY;
     }
 
-    if (curl->post_data && curl->config.method == HTTP_METHOD_POST) {
-        esp_http_client_set_post_field(curl->esp_client, curl->post_data, curl->post_data_size);
+    uint32_t start_ms = curl_now_ms();
+    esp_http_client_reset_redirect_counter(curl->esp_client); /* counts authentication retries */
+    curl_apply_request_headers(curl);
+
+    CURLcode rc = curl_request(curl, start_ms, buf);
+    if (rc == CURLE_OK && curl->config.method != HTTP_METHOD_HEAD) {
+        rc = curl_read_body(curl, start_ms, buf);
+    } else if (rc == CURLE_OK) {
+        if (curl->server_closes)
+            curl_close_connection(curl);
+    } else {
+        curl_close_connection(curl);
     }
+    dlfree(buf);
 
-    /* Content-Type is per response; do not report the previous one. */
-    dlfree(curl->content_type);
-    curl->content_type = NULL;
-
-    esp_err_t err = esp_http_client_perform(curl->esp_client);
+    if (curl->verbose) {
+        ESP_LOGI(TAG, "%s: rc=%d status=%d bytes=%lld redirects=%ld keep=%d", curl->effective_url, rc,
+                 curl->response_code, curl->size_download, curl->redirect_count, curl->conn_alive);
+    }
 
     if (curl->cookie_jar) {
         save_cookies_to_file(curl, curl->cookie_jar);
     }
 
-    esp_http_client_cleanup(curl->esp_client);
-    curl->esp_client = NULL;
-
-    if (err == ESP_OK) {
-        return CURLE_OK;
-    } else if (err == ESP_ERR_TIMEOUT) {
-        return CURLE_OPERATION_TIMEDOUT;
-    } else if (err == ESP_ERR_HTTP_CONNECT) {
-        return CURLE_COULDNT_CONNECT;
-    } else {
-        return CURLE_HTTP_RETURNED_ERROR;
-    }
+    return rc;
 }
 
 void curl_easy_cleanup(CURL *curl_handle) {
@@ -991,6 +1814,10 @@ void curl_easy_cleanup(CURL *curl_handle) {
     dlfree(curl->post_data);
     dlfree(curl->content_type);
     dlfree(curl->effective_url);
+    dlfree(curl->accept_encoding);
+    dlfree(curl->location);
+    dlfree(curl->conn_origin);
+    dlfree(curl->sent_header_keys);
 
     free_all_cookies(curl->cookies);
     dlfree(curl->cookie_file);
@@ -1041,6 +1868,18 @@ CURLcode curl_easy_getinfo(CURL *curl_handle, curl_easy_info_t info, ...) {
             break;
         }
 
+        case CURLINFO_SIZE_DOWNLOAD: {
+            double *size = va_arg(args, double *);
+            *size        = (double)curl->size_download;
+            break;
+        }
+
+        case CURLINFO_REDIRECT_COUNT: {
+            long *count = va_arg(args, long *);
+            *count      = curl->redirect_count;
+            break;
+        }
+
         default: va_end(args); return CURLE_UNSUPPORTED_PROTOCOL;
     }
 
@@ -1059,6 +1898,18 @@ char const *curl_easy_strerror(CURLcode error) {
         case CURLE_HTTP_RETURNED_ERROR: return "HTTP returned error";
         case CURLE_OPERATION_TIMEDOUT: return "Operation timed out";
         case CURLE_SSL_CONNECT_ERROR: return "SSL connect error";
+        case CURLE_SSL_PEER_CERTIFICATE: return "SSL peer certificate was not OK";
+        case CURLE_WEIRD_SERVER_REPLY: return "Weird server reply";
+        case CURLE_WRITE_ERROR: return "Failed writing received data";
+        case CURLE_OUT_OF_MEMORY: return "Out of memory";
+        case CURLE_SEND_ERROR: return "Failed sending data to the peer";
+        case CURLE_RECV_ERROR: return "Failure when receiving data from the peer";
+        case CURLE_BAD_CONTENT_ENCODING: return "Unrecognized or bad HTTP Content or Transfer-Encoding";
+        case CURLE_FILESIZE_EXCEEDED: return "Maximum file size exceeded";
+        case CURLE_LOGIN_DENIED: return "Login denied";
+        case CURLE_ABORTED_BY_CALLBACK: return "Operation was aborted by an application callback";
+        case CURLE_TOO_MANY_REDIRECTS: return "Number of redirects hit maximum amount";
+        case CURLE_PARTIAL_FILE: return "Transferred a partial file";
         default: return "Unknown error";
     }
 }

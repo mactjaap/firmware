@@ -26,9 +26,10 @@ extern "C" {
 
 #define CURL_GLOBAL_DEFAULT 0
 
-typedef void CURL;
-typedef int  CURLcode;
-typedef int  CURLoption;
+typedef void    CURL;
+typedef int     CURLcode;
+typedef int     CURLoption;
+typedef int64_t curl_off_t;
 
 typedef enum {
     CURLE_OK = 0,
@@ -58,7 +59,10 @@ typedef enum {
     CURLE_SEND_FAIL_REWIND,
     CURLE_SSL_ENGINE_INITFAILED,
     CURLE_LOGIN_DENIED,
-    CURLE_ABORTED_BY_CALLBACK
+    CURLE_ABORTED_BY_CALLBACK,
+    /* Added in BadgeVMS 4.3 (appended: the numbers above do not change). */
+    CURLE_TOO_MANY_REDIRECTS,
+    CURLE_PARTIAL_FILE
 } curl_easy_error_t;
 
 typedef enum {
@@ -100,13 +104,25 @@ typedef enum {
     CURLOPT_HTTPAUTH          = 107,
     CURLOPT_PROXYAUTH         = 111,
     CURLOPT_BUFFERSIZE        = 98,
+    /* Added in BadgeVMS 4.3 */
+    CURLOPT_NOPROGRESS        = 43,
+    CURLOPT_XFERINFODATA      = 10057,
+    CURLOPT_XFERINFOFUNCTION  = 20219,
+    CURLOPT_ACCEPT_ENCODING   = 10102,
+    CURLOPT_COOKIELIST        = 10135, /* "ALL", "SESS", "FLUSH", "RELOAD" or "Set-Cookie: ..." */
 } curl_easy_option_t;
+
+/* Older name of CURLOPT_XFERINFODATA, as in libcurl. */
+#define CURLOPT_PROGRESSDATA CURLOPT_XFERINFODATA
 
 typedef enum {
     CURLINFO_RESPONSE_CODE           = 0x200002,
     CURLINFO_CONTENT_LENGTH_DOWNLOAD = 0x300003,
     CURLINFO_CONTENT_TYPE            = 0x100012,
-    CURLINFO_EFFECTIVE_URL           = 0x100001
+    CURLINFO_EFFECTIVE_URL           = 0x100001,
+    /* Added in BadgeVMS 4.3 */
+    CURLINFO_SIZE_DOWNLOAD           = 0x300008, /* double: body bytes received (before decoding) */
+    CURLINFO_REDIRECT_COUNT          = 0x200014  /* long */
 } curl_easy_info_t;
 
 // Proxy types (for CURLOPT_PROXYTYPE)
@@ -133,6 +149,17 @@ typedef enum {
 
 typedef size_t (*curl_write_callback)(void *contents, size_t size, size_t nmemb, void *userp);
 typedef size_t (*curl_header_callback)(void *contents, size_t size, size_t nmemb, void *userp);
+
+/*
+ * Progress callback (CURLOPT_XFERINFOFUNCTION, used when CURLOPT_NOPROGRESS
+ * is 0).  Called while waiting for and receiving the response, at least
+ * twice a second.  dltotal is 0 when the size is not known.  Return non-zero
+ * to stop the transfer: curl_easy_perform() then returns
+ * CURLE_ABORTED_BY_CALLBACK.
+ */
+typedef int (*curl_xferinfo_callback)(
+    void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow
+);
 
 typedef struct curl_handle curl_handle_t;
 

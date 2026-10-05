@@ -56,7 +56,7 @@
 /* ===========================================================
    Test bookkeeping
    =========================================================== */
-#define NUM_TESTS      10
+#define NUM_TESTS      14
 #define LOG_LINES_MAX  160
 #define LOG_COLS       52 /* characters per detail line */
 #define BODY_SHOW_MAX  480 /* bytes of each response body shown */
@@ -331,7 +331,11 @@ static bool t_multiple(void) {
     for (int i = 0; i < 3; i++) {
         tlog("--- Request %d: %s\n", i + 1, urls[i]);
         curl_easy_setopt(curl, CURLOPT_URL, urls[i]);
-        long code = perform(curl, "GET");
+        uint32_t t0   = SDL_GetTicks();
+        long     code = perform(curl, "GET");
+        /* Requests 2 and 3 reuse the connection of request 1 (no new
+         * TLS handshake), so they should be much faster. */
+        tlog("%u ms\n", (unsigned)(SDL_GetTicks() - t0));
         char want[16];
         snprintf(want, sizeof(want), "page=%d", i + 1);
         if (code == 200 && body_has(&b, want))
@@ -517,6 +521,151 @@ static bool t_cookie_headers(void) {
     return c1 > 0 && c2 == 200 && g_saw_set_cookie;
 }
 
+/* ---------- 4.3 firmware features ---------- */
+typedef struct {
+    int      calls;
+    uint32_t start;
+    uint32_t stop_after_ms;
+    int64_t  last_now;
+} progress_t;
+
+static int progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    progress_t *p = clientp;
+    (void)ultotal;
+    (void)ulnow;
+    p->calls++;
+    p->last_now = dlnow;
+    if (p->calls <= 3 || p->calls % 4 == 0)
+        tlog("progress %d: %lld of %lld bytes\n", p->calls, (long long)dlnow, (long long)dltotal);
+    return SDL_GetTicks() - p->start >= p->stop_after_ms; /* non-zero: stop */
+}
+
+static bool t_progress_stop(void) {
+    body_t     b    = {0};
+    progress_t p    = {0};
+    CURL      *curl = curl_easy_init();
+    if (!curl)
+        return false;
+    /* /drip sends 10 bytes spread over 6 seconds: stop it after 2. */
+    curl_easy_setopt(curl, CURLOPT_URL, "https://httpbin.org/drip?duration=6&numbytes=10&delay=0");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, UA);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &p);
+    p.start         = SDL_GetTicks();
+    p.stop_after_ms = 2000;
+    tlog("GET /drip (6 s), stop after 2 s\n");
+    CURLcode res = curl_easy_perform(curl);
+    uint32_t ms  = SDL_GetTicks() - p.start;
+    tlog("result: %s after %u ms, %d progress calls, %u bytes\n", curl_easy_strerror(res), (unsigned)ms, p.calls,
+         (unsigned)b.size);
+    bool ok = res == CURLE_ABORTED_BY_CALLBACK && p.calls >= 3 && ms < 4500;
+    set_summary("%s, %d calls, %u ms", res == CURLE_ABORTED_BY_CALLBACK ? "stopped" : "NOT stopped", p.calls,
+                (unsigned)ms);
+    body_reset(&b);
+    curl_easy_cleanup(curl);
+    return ok;
+}
+
+static size_t limited_cb(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t  realsize = size * nmemb;
+    body_t *b        = userp;
+    if (b->size >= 8192)
+        return 0; /* enough: stop the transfer */
+    b->size += realsize;
+    (void)contents;
+    return realsize;
+}
+
+static bool t_write_stop(void) {
+    body_t b    = {0};
+    CURL  *curl = curl_easy_init();
+    if (!curl)
+        return false;
+    curl_easy_setopt(curl, CURLOPT_URL, "https://httpbin.org/bytes/90000");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, UA);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, limited_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
+    tlog("GET /bytes/90000, callback stops after 8 KB\n");
+    CURLcode res = curl_easy_perform(curl);
+    double   got = 0;
+    curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD, &got);
+    tlog("result: %s, kept %u bytes, received %.0f bytes\n", curl_easy_strerror(res), (unsigned)b.size, got);
+    bool ok = res == CURLE_WRITE_ERROR && got < 90000;
+    set_summary("%s, %.0f of 90000 bytes", res == CURLE_WRITE_ERROR ? "stopped" : "NOT stopped", got);
+    curl_easy_cleanup(curl);
+    return ok;
+}
+
+static bool t_gzip(void) {
+    body_t b     = {0};
+    bool   gz    = false, df = false;
+    double bytes = 0;
+    CURL  *curl  = curl_easy_init();
+    if (!curl)
+        return false;
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, UA);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, ""); /* all supported: gzip, deflate */
+
+    tlog("1) GET /gzip\n");
+    curl_easy_setopt(curl, CURLOPT_URL, "https://httpbin.org/gzip");
+    long c1 = perform(curl, "gzip");
+    curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD, &bytes);
+    gz = c1 == 200 && body_has(&b, "\"gzipped\": true");
+    tlog("%.0f bytes received, %u bytes decoded, %s\n", bytes, (unsigned)b.size, gz ? "decoded" : "NOT decoded");
+    body_reset(&b);
+
+    tlog("2) GET /deflate\n");
+    curl_easy_setopt(curl, CURLOPT_URL, "https://httpbin.org/deflate");
+    long c2 = perform(curl, "deflate");
+    curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD, &bytes);
+    df = c2 == 200 && body_has(&b, "\"deflated\": true");
+    tlog("%.0f bytes received, %u bytes decoded, %s\n", bytes, (unsigned)b.size, df ? "decoded" : "NOT decoded");
+    body_show(&b);
+    body_reset(&b);
+
+    set_summary("gzip %s, deflate %s", gz ? "ok" : "X", df ? "ok" : "X");
+    curl_easy_cleanup(curl);
+    return gz && df;
+}
+
+static bool t_redirect_errors(void) {
+    body_t b    = {0};
+    CURL  *curl = curl_easy_init();
+    if (!curl)
+        return false;
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, UA);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, body_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &b);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    tlog("1) GET /redirect/2 (follow)\n");
+    curl_easy_setopt(curl, CURLOPT_URL, "https://httpbin.org/redirect/2");
+    long  code  = perform(curl, "Redirect");
+    char *final = NULL;
+    long  hops  = 0;
+    curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &final);
+    curl_easy_getinfo(curl, CURLINFO_REDIRECT_COUNT, &hops);
+    tlog("effective URL: %s\nredirects: %ld\n", final ? final : "(none)", hops);
+    bool redirect_ok = code == 200 && hops == 2 && final && strstr(final, "/get");
+    body_reset(&b);
+
+    tlog("2) GET http://does-not-exist.invalid/\n");
+    curl_easy_setopt(curl, CURLOPT_URL, "http://does-not-exist.invalid/");
+    CURLcode res = curl_easy_perform(curl);
+    tlog("result: %s (%d)\n", curl_easy_strerror(res), (int)res);
+    bool dns_ok = res == CURLE_COULDNT_RESOLVE_HOST;
+    body_reset(&b);
+
+    set_summary("redirect %s, DNS error %s", redirect_ok ? "ok" : "X", dns_ok ? "ok" : "X");
+    curl_easy_cleanup(curl);
+    return redirect_ok && dns_ok;
+}
+
 static test_t g_test_table[NUM_TESTS] = {
     {.name = "Simple GET", .run = t_simple_get},
     {.name = "POST JSON", .run = t_post_json},
@@ -528,6 +677,10 @@ static test_t g_test_table[NUM_TESTS] = {
     {.name = "Cookie persistence", .run = t_persistence},
     {.name = "Proxy/option stubs", .run = t_proxy_stubs},
     {.name = "Cookie headers", .run = t_cookie_headers},
+    {.name = "Progress + stop", .run = t_progress_stop},
+    {.name = "Write callback stop", .run = t_write_stop},
+    {.name = "gzip / deflate", .run = t_gzip},
+    {.name = "Redirect + DNS err", .run = t_redirect_errors},
 };
 
 /* ===========================================================
@@ -625,7 +778,7 @@ static int done_count(void) {
     return n;
 }
 
-#define ROW_H        30
+#define ROW_H        25
 #define LIST_Y       (WIN_Y + TITLE_H + 40)
 #define LIST_H       (NUM_TESTS * ROW_H + 8)
 #define DETAIL_Y     (LIST_Y + LIST_H + 10)

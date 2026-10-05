@@ -1493,7 +1493,7 @@ int64_t esp_http_client_fetch_headers(esp_http_client_handle_t client)
         buffer->len = esp_transport_read(client->transport, buffer->data, client->buffer_size_rx, client->timeout_ms);
         if (buffer->len <= 0) {
             if (buffer->len == ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT) {
-                ESP_LOGW(TAG, "Connection timed out before data was ready!");
+                ESP_LOGD(TAG, "Connection timed out before data was ready!");
                 return -ESP_ERR_HTTP_EAGAIN;
             }
             return ESP_FAIL;
