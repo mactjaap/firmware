@@ -172,7 +172,7 @@ static stbi_uc *mb_stbi_load_gif_first_frame_from_memory(
 #endif
 
 /* ---------- Mini Browser version ---------- */
-#define MINI_BROWSER_VERSION "4.4-dev1"
+#define MINI_BROWSER_VERSION "4.4-dev2"
 
 /* ---------- Limits & layout ---------- */
 #define MAX_BYTES     (64 * 1024)
@@ -2799,6 +2799,18 @@ static void free_page(page_t *page) {
     free(page->strings);
     free(page->html);
     free(page);
+}
+
+/* 4.4-dev2: only the page on screen keeps its HTML (up to MAX_BYTES, for the
+ * simplified view).  Pages parked in the Back/Forward cache or in a
+ * background tab drop it, so 3 cached pages + 4 tabs cannot hold 7 extra
+ * copies of up to 64 KB each. */
+static void page_drop_html(page_t *page) {
+    if (!page || !page->html) return;
+    free(page->html);
+    page->html = NULL;
+    page->html_len = 0;
+    page->reader_offer = false;
 }
 
 /* ---------- UTF-8 decoder forward declaration ---------- */
@@ -7850,6 +7862,7 @@ __attribute__((noinline)) static void tab_save(browser_t *b, int i) {
     tab_t *t = &g_tabs[i];
     snprintf(t->url, sizeof t->url, "%s", b->url_buf);
     t->page = b->page;
+    page_drop_html(t->page);
     t->content_wrapped = b->content_wrapped;
     t->content_lines = b->content_lines;
     t->max_scroll = b->max_scroll;
@@ -8833,6 +8846,7 @@ __attribute__((noinline)) static void browser_log_page(browser_t *b, long http_s
 #define DOWNLOAD_LIST_MAX  50
 #define SAVED_DIR          "FLASH0:[SAVED]"          /* 4.4: pages saved with WHY+P */
 #define SAVED_LIST         "APPS:[mini_browser]saved.txt"
+#define SAVED_TMP          "APPS:[mini_browser]saved.tmp"
 #define SAVED_LIST_MAX     50
 
 /* BadgeVMS file names: letters, digits, '_', '-', '$' and '.'. */
@@ -9178,29 +9192,23 @@ static void downloads_delete_all(void) {
 /* ---------- 4.4: text zoom (WHY+= / WHY+- / WHY+0) ----------
  * The page text is drawn with the 5x7 font at 2x (100%), 3x (150%) or
  * 4x (200%) and re-wrapped; Unicode glyphs scale along.  The bar and menus
- * stay at 100%.  The choice is kept in SETTINGS_FILE. */
-#define SETTINGS_FILE  "APPS:[mini_browser]settings.txt"
+ * stay at 100%.
+ *
+ * 4.4-dev2: the zoom is for this session only.  4.4-dev1 saved it in
+ * settings.txt, so a zoom (or a regression run that stopped half-way) made
+ * every later start bigger, and the page text logged on the serial port -
+ * which the regression suite reads - was wrapped at the zoomed width.
+ * That file is removed once at start. */
+#define LEGACY_SETTINGS_FILE "APPS:[mini_browser]settings.txt"
 #define ZOOM_MIN_SCALE 2
 #define ZOOM_MAX_SCALE 4
 
-static void settings_save(void) {
-    FILE *f = fopen(SETTINGS_FILE, "w");
+static void settings_remove_legacy(void) {
+    FILE *f = fopen(LEGACY_SETTINGS_FILE, "r");
     if (!f) return;
-    fprintf(f, "zoom=%d\n", g_page_scale * 50);
     fclose(f);
-}
-
-static void settings_load(void) {
-    FILE *f = fopen(SETTINGS_FILE, "r");
-    if (!f) return;
-    char line[64];
-    while (fgets(line, sizeof line, f)) {
-        int z = 0;
-        if (sscanf(line, "zoom=%d", &z) == 1 && z >= ZOOM_MIN_SCALE * 50 && z <= ZOOM_MAX_SCALE * 50)
-            g_page_scale = z / 50;
-    }
-    fclose(f);
-    if (g_page_scale != 2) printf("[mini_browser] zoom: %d%%\n", g_page_scale * 50);
+    remove(LEGACY_SETTINGS_FILE);
+    printf("[mini_browser] zoom: removed the 4.4-dev1 settings file, text at 100%%\n");
 }
 
 /* Re-wrap a page's text for the current zoom. */
@@ -9244,7 +9252,6 @@ __attribute__((noinline)) static void browser_set_zoom(browser_t *b, int scale) 
         g_tabs[i].scroll_lines = 0;
     }
     bfcache_clear();
-    settings_save();
     browser_set_status(b, msg, 1200);
     printf("[mini_browser] zoom: %d%%, %d columns\n", scale * 50, k_max_cols);
     b->dirty = true;
@@ -9524,8 +9531,12 @@ __attribute__((noinline)) static void browser_toggle_reader(browser_t *b) {
         browser_return_from_local_page(b);
         return;
     }
-    if (b->view != VIEW_WEB || !b->page || !b->page->html) {
+    if (b->view != VIEW_WEB || !b->page) {
         browser_set_status(b, "NO SIMPLIFIED VIEW HERE", 1500);
+        return;
+    }
+    if (!b->page->html) {   /* came back from the cache or another tab */
+        browser_set_status(b, "RELOAD (WHY+R) FOR THE SIMPLIFIED VIEW", 2000);
         return;
     }
     page_t *pg = reader_build(b->page);
@@ -9592,13 +9603,30 @@ static size_t page_plain_text(const char *in, char *out, size_t cap) {
     return o;
 }
 
+/* 4.4-dev2: the address of the page on screen.  Not b->url_buf: while the
+ * omnibox is open that holds the half-typed text, so WHY+U / WHY+P used to
+ * share or save a page under what was being typed. */
+static const char *browser_page_url(const browser_t *b) {
+    if (b->view == VIEW_WEB) {
+        const char *shown = shown_web_url(b);
+        if (shown) return shown;
+        return b->input == INPUT_URL ? NULL : b->url_buf;
+    }
+    if (b->view == VIEW_READER && b->view_return_url[0]) return b->view_return_url;
+    return NULL;
+}
+
 __attribute__((noinline)) static void browser_save_page(browser_t *b) {
     static char name[64], path[128], line[URL_MAX + 200];
     if (!b->page || !b->page->text || (b->view != VIEW_WEB && b->view != VIEW_READER)) {
         browser_set_status(b, "NOTHING TO SAVE HERE", 1500);
         return;
     }
-    const char *url = b->view == VIEW_READER ? b->view_return_url : b->url_buf;
+    const char *url = browser_page_url(b);
+    if (!url) {
+        browser_set_status(b, "NOTHING TO SAVE HERE", 1500);
+        return;
+    }
     const char *title = b->page->title[0] ? b->page->title : url;
     size_t cap = strlen(b->page->text) + 1024;
     char *text = (char *)malloc(cap);
@@ -9607,10 +9635,16 @@ __attribute__((noinline)) static void browser_save_page(browser_t *b) {
 
     /* The list, newest first.  Saving a page again replaces its earlier
      * copy; entries whose file is gone are dropped. */
-    static char lines[SAVED_LIST_MAX][URL_MAX + 200];
+    typedef char saved_line_t[URL_MAX + 200];
+    saved_line_t *lines = (saved_line_t *)malloc(SAVED_LIST_MAX * sizeof(saved_line_t));
     static char reuse[128];
     int count = 0;
     reuse[0] = 0;
+    if (!lines) {
+        free(text);
+        browser_set_status(b, "OUT OF MEMORY", 1500);
+        return;
+    }
     FILE *l = fopen(SAVED_LIST, "r");
     if (l) {
         while (count < SAVED_LIST_MAX - 1 && fgets(lines[count], sizeof lines[count], l)) {
@@ -9654,20 +9688,31 @@ __attribute__((noinline)) static void browser_save_page(browser_t *b) {
     }
     free(text);
     if (!ok) {
+        free(lines);
         remove(path);
         browser_set_status(b, "COULD NOT SAVE (FLASH FULL?)", 2000);
         printf("[mini_browser] saved page: failed %s\n", path);
         return;
     }
-    remove(SAVED_LIST);
-    l = fopen(SAVED_LIST, "w");
+    /* The list is "path<TAB>title<TAB>url" per line: a tab or line break in
+     * the title would corrupt it.  Written to a temporary file first, so a
+     * full flash does not lose the existing list. */
+    static char clean_title[200];
+    snprintf(clean_title, sizeof clean_title, "%s", title);
+    for (char *c = clean_title; *c; c++) if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
+    l = fopen(SAVED_TMP, "w");
     if (l) {
-        snprintf(line, sizeof line, "%s\t%s\t%s", path, title, url);
-        for (char *c = line + strlen(path) + 1; *c; c++) if (*c == '\n') *c = ' ';
-        fprintf(l, "%s\n", line);
-        for (int i = 0; i < count; i++) fprintf(l, "%s\n", lines[i]);
-        fclose(l);
+        bool list_ok = fprintf(l, "%s\t%s\t%s\n", path, clean_title, url) > 0;
+        for (int i = 0; i < count && list_ok; i++) list_ok = fprintf(l, "%s\n", lines[i]) > 0;
+        if (fclose(l) != 0) list_ok = false;
+        if (list_ok) {
+            remove(SAVED_LIST);
+            rename(SAVED_TMP, SAVED_LIST);
+        } else {
+            remove(SAVED_TMP);
+        }
     }
+    free(lines);
     struct stat st;
     long size = stat(path, &st) == 0 ? (long)st.st_size : 0;
     printf("[mini_browser] saved page: %s (%ld bytes%s)\n", path, size, reuse[0] ? ", replaced" : "");
@@ -9694,6 +9739,10 @@ __attribute__((noinline)) static void browser_open_saved(browser_t *b, int numbe
         return;
     }
     *tab = 0;
+    if (strncmp(line, SAVED_DIR, strlen(SAVED_DIR)) != 0 || strstr(line, "..")) {
+        browser_set_status(b, "SAVED PAGE NOT FOUND", 1500);   /* only files we saved */
+        return;
+    }
     FILE *f = fopen(line, "r");
     if (!f) {
         browser_set_status(b, "SAVED PAGE WAS DELETED", 1500);
@@ -9735,11 +9784,6 @@ static uint8_t g_qr_tmp[qrcodegen_BUFFER_LEN_FOR_VERSION(15)];
 static char g_share_url[URL_MAX];
 static bool g_qr_ok;
 
-static const char *browser_page_url(const browser_t *b) {
-    if (b->view == VIEW_WEB) return b->url_buf;
-    if (b->view == VIEW_READER && b->view_return_url[0]) return b->view_return_url;
-    return NULL;
-}
 
 static void browser_share(browser_t *b) {
     const char *url = browser_page_url(b);
@@ -9748,6 +9792,14 @@ static void browser_share(browser_t *b) {
         return;
     }
     snprintf(g_share_url, sizeof g_share_url, "%s", url);
+    /* Never share a "user:password@" part of the address (shown, QR, serial). */
+    char *host = strstr(g_share_url, "://");
+    if (host) {
+        host += 3;
+        size_t n = strcspn(host, "/?#");
+        char *at = memchr(host, '@', n);
+        if (at) memmove(host, at + 1, strlen(at + 1) + 1);
+    }
     g_qr_ok = qrcodegen_encodeText(g_share_url, g_qr_tmp, g_qr, qrcodegen_Ecc_MEDIUM, 1, 15,
                                    qrcodegen_Mask_AUTO, true);
     printf("[mini_browser] share: %s (QR %s)\n", g_share_url, g_qr_ok ? "ok" : "too long");
@@ -9835,8 +9887,9 @@ __attribute__((noinline)) static void browser_fetch(browser_t *b) {
     /* 4.4: "saved:N" links on the Downloads page. */
     if (!strncmp(b->url_buf, "saved:", 6)) {
         int number = atoi(b->url_buf + 6);
+        bool from_downloads = b->view == VIEW_DOWNLOADS;   /* not a link on a web page */
         browser_restore_shown_url(b);
-        if (number > 0) browser_open_saved(b, number);
+        if (number > 0 && from_downloads) browser_open_saved(b, number);
         return;
     }
 
@@ -9939,8 +9992,13 @@ __attribute__((noinline)) static void browser_fetch(browser_t *b) {
     /* The page that was on screen goes to the Back/Forward cache, unless
      * the result is shown over it (a direct image). */
     const char *shown_url = shown_web_url(b);
-    if (!image && shown_url && strcmp(shown_url, b->url_buf) != 0)   /* not on reload */
+    if (!image && shown_url && strcmp(shown_url, b->url_buf) != 0) {   /* not on reload */
         bfcache_store(b, shown_url, &shown_meta);
+        /* Navigated away: the cached copy does not need its HTML.  (Pages
+         * parked for Page info / the simplified view keep it.) */
+        int parked = bfcache_find(shown_url);
+        if (parked >= 0) page_drop_html(g_bfcache[parked].page);
+    }
     browser_commit_navigation(b, hist_target, history_navigation);
     b->reader_chip_hidden = false;
     g_fetch_meta.wire_bytes = g_net_wire_bytes;
@@ -10091,10 +10149,13 @@ __attribute__((noinline)) static void browser_compose_bar(browser_t *b) {
         img[0] = 0;
         if (g_bg.active && g_bg.page == page)
             snprintf(img, sizeof img, "[img %d/%d] ", g_bg.done, g_bg.count);
+        static char zoom[12];
+        zoom[0] = 0;
+        if (g_page_scale != 2) snprintf(zoom, sizeof zoom, "%d%% ", g_page_scale * 50);
         if (g_tab_count > 1)
-            snprintf(bar, cap, "[%d/%d] %s%s", g_tab_cur + 1, g_tab_count, img, page->title);
+            snprintf(bar, cap, "[%d/%d] %s%s%s", g_tab_cur + 1, g_tab_count, zoom, img, page->title);
         else
-            snprintf(bar, cap, "%s%s", img, page->title);
+            snprintf(bar, cap, "%s%s%s", zoom, img, page->title);
     } else {
         snprintf(bar, cap, "%s", b->url_buf);
     }
@@ -10131,6 +10192,12 @@ static void browser_render_options(browser_t *b) {
     draw_text(ren, PAD_LR, oy, "Mode 4: 5 inline - EXPERIMENTAL / more memory", w);
     oy += (CH_H + LINE_SPACING);
     draw_text(ren, PAD_LR, oy, "JPEG/PNG/GIF - Press 1/2/3/4, Esc to cancel", w);
+    oy += 2 * (CH_H + LINE_SPACING);
+    snprintf(option_line, sizeof(option_line), "Text size: %d%%  (WHY+= bigger, WHY+- smaller,",
+             g_page_scale * 50);
+    draw_text(ren, PAD_LR, oy, option_line, w);
+    oy += (CH_H + LINE_SPACING);
+    draw_text(ren, PAD_LR, oy, "WHY+0 back to 100%; not kept after a restart)", w);
 }
 
 /* Pointer to the first visible line, with the formatting state there. */
@@ -11153,7 +11220,7 @@ int main(void) {
     visit_load();
     cookie_load();     /* 4.3 */
     cache_init();      /* 4.3 */
-    settings_load();   /* 4.4: zoom */
+    settings_remove_legacy();   /* 4.4-dev2: zoom is no longer saved */
 
 #if defined(ESP_PLATFORM)
     esp_log_level_set("ESP_CURL",        ESP_LOG_ERROR);
