@@ -28,6 +28,7 @@
 #include "memory.h"
 #include "thirdparty/khash.h"
 #include "why_io.h"
+#include "riscv/rvruntime-frames.h"
 
 #include <stdatomic.h>
 
@@ -323,7 +324,17 @@ void IRAM_ATTR cerberos() {
 void IRAM_ATTR __wrap_xt_unhandled_exception(void *frame) {
     task_info_t *task_info = get_task_info();
     if (task_info && task_info->pid) {
+        RvExcFrame *f = (RvExcFrame *)frame;
+        /* Where it happened, so the crash can be found in the app's ELF
+         * (addr2line on mepc/ra minus the load offset of "Start ELF file
+         * entrypoint at ..."). */
         esp_rom_printf("Task %u caused an unhandled exception, Cerberos will deal with it\n", task_info->pid);
+        esp_rom_printf("Task %u: mcause 0x%08x mtval 0x%08x mepc 0x%08x ra 0x%08x sp 0x%08x\n", task_info->pid,
+                       (unsigned)f->mcause, (unsigned)f->mtval, (unsigned)f->mepc, (unsigned)f->ra,
+                       (unsigned)f->sp);
+        esp_rom_printf("Task %u: a0 0x%08x a1 0x%08x a2 0x%08x a3 0x%08x s0 0x%08x s1 0x%08x\n", task_info->pid,
+                       (unsigned)f->a0, (unsigned)f->a1, (unsigned)f->a2, (unsigned)f->a3, (unsigned)f->s0,
+                       (unsigned)f->s1);
 
         // Send task off to think about what it did until its timeslice runs out
         __asm__ volatile("csrw mepc, %0\n\t" // Set return address
