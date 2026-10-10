@@ -1129,7 +1129,26 @@ typedef struct {
     int      gz_stage;             /* 0 fixed, 1 extra len, 2 extra, 3 name, 4 comment, 5 hcrc, 6 data */
     uint32_t gz_skip;
     int      encoding;
+    /* 4.5: the gzip trailer is checked: CRC32 and length of the output */
+    uint32_t crc;                  /* running CRC32 of the output (inverted) */
+    uint32_t out_total;            /* output bytes, modulo 2^32 */
+    uint8_t  trailer[8];
+    int      trailer_len;
 } curl_inflate_t;
+
+/* CRC32 (IEEE, as gzip), 4 bits at a time: small and fast enough here. */
+static uint32_t curl_crc32_update(uint32_t crc, uint8_t const *p, size_t n) {
+    static uint32_t const t[16] = {
+        0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC, 0x76DC4190, 0x6B6B51F4, 0x4DB26158, 0x5005713C,
+        0xEDB88320, 0xF00F9344, 0xD6D6A3E8, 0xCB61B38C, 0x9B64C2B0, 0x86D3D2D4, 0xA00AE278, 0xBDBDF21C,
+    };
+    while (n--) {
+        crc ^= *p++;
+        crc = (crc >> 4) ^ t[crc & 15];
+        crc = (crc >> 4) ^ t[crc & 15];
+    }
+    return crc;
+}
 
 static uint32_t curl_now_ms(void) {
     return (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
@@ -1315,12 +1334,19 @@ static CURLcode curl_inflate_run(curl_handle_t *curl, curl_inflate_t *z, uint8_t
         in  += in_size;
         len -= in_size;
         if (out_size) {
+            z->crc = curl_crc32_update(z->crc, z->dict + z->dict_ofs, out_size);
+            z->out_total += (uint32_t)out_size;
             if (!curl_deliver(curl, (char *)z->dict + z->dict_ofs, out_size))
                 return CURLE_WRITE_ERROR;
             z->dict_ofs = (z->dict_ofs + out_size) & (TINFL_LZ_DICT_SIZE - 1);
         }
         if (status == TINFL_STATUS_DONE) {
-            z->done = true; /* the gzip trailer (CRC, size) is ignored */
+            z->done = true;
+            /* 4.5: keep the gzip trailer (CRC32, size) to check it at the end */
+            while (len && z->trailer_len < 8) {
+                z->trailer[z->trailer_len++] = *in++;
+                len--;
+            }
             break;
         }
         if (status < 0)
@@ -1335,6 +1361,13 @@ static CURLcode curl_inflate_run(curl_handle_t *curl, curl_inflate_t *z, uint8_t
 
 /* Feed compressed body bytes (gzip or deflate). */
 static CURLcode curl_inflate_feed(curl_handle_t *curl, curl_inflate_t *z, uint8_t const *in, size_t len) {
+    if (z->done) {                    /* the rest of the gzip trailer */
+        while (len && z->trailer_len < 8) {
+            z->trailer[z->trailer_len++] = *in++;
+            len--;
+        }
+        return CURLE_OK;
+    }
     if (z->encoding == CONTENT_ENCODING_DEFLATE && z->gz_stage < 6) {
         /* "deflate" is meant to be zlib-wrapped, but some servers send raw
          * deflate: look at the first two bytes for a valid zlib header. */
@@ -1672,6 +1705,7 @@ static CURLcode curl_read_body(curl_handle_t *curl, uint32_t start_ms, char *buf
         tinfl_init(&z->decomp);
         z->encoding = curl->content_encoding;
         z->gz_stage = 0;
+        z->crc      = 0xFFFFFFFFu;
     }
 
     CURLcode rc         = CURLE_OK;
@@ -1721,6 +1755,24 @@ static CURLcode curl_read_body(curl_handle_t *curl, uint32_t start_ms, char *buf
         if (rc == CURLE_OK && !z->done) {
             ESP_LOGW(TAG, "compressed body ended early");
             rc = CURLE_BAD_CONTENT_ENCODING;
+        }
+        /* 4.5: a gzip body must match its trailer; a mismatch means the data
+         * was damaged on the way or in decoding (the caller can then ask for
+         * the page uncompressed).  zlib "deflate" is checked by tinfl itself
+         * (Adler-32). */
+        if (rc == CURLE_OK && z->encoding == CONTENT_ENCODING_GZIP && z->trailer_len == 8) {
+            uint32_t want_crc  = (uint32_t)z->trailer[0] | ((uint32_t)z->trailer[1] << 8) |
+                                 ((uint32_t)z->trailer[2] << 16) | ((uint32_t)z->trailer[3] << 24);
+            uint32_t want_size = (uint32_t)z->trailer[4] | ((uint32_t)z->trailer[5] << 8) |
+                                 ((uint32_t)z->trailer[6] << 16) | ((uint32_t)z->trailer[7] << 24);
+            uint32_t crc       = ~z->crc;
+            if (crc != want_crc || z->out_total != want_size) {
+                ESP_LOGE(TAG, "gzip check failed: %lu bytes (expected %lu), CRC %08lx (expected %08lx), "
+                              "%lld compressed bytes",
+                         (unsigned long)z->out_total, (unsigned long)want_size, (unsigned long)crc,
+                         (unsigned long)want_crc, curl->size_download);
+                rc = CURLE_BAD_CONTENT_ENCODING;
+            }
         }
         dlfree(z);
     }
