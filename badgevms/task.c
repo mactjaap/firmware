@@ -29,6 +29,7 @@
 #include "thirdparty/khash.h"
 #include "why_io.h"
 #include "riscv/rvruntime-frames.h"
+#include "esp_memory_utils.h"
 
 #include <stdatomic.h>
 
@@ -321,6 +322,49 @@ void IRAM_ATTR cerberos() {
     }
 }
 
+/* Crash report helpers (Mini Browser 4.5-dev2 debugging).
+ *
+ * abort(), assert() and a heap check all end in panic_abort() with the
+ * reason as a text in a0; print it.  The stack holds the return addresses
+ * of the functions that led there: print the words that look like code
+ * addresses (badge_crash.py turns them into function names, firmware ones
+ * with badgevms.elf and app ones with the app's ELF). */
+static void cerberos_print_text(unsigned pid, uint32_t addr) {
+    const char *p = (const char *)addr;
+    char        buf[161];
+    int         n = 0;
+    if (!esp_ptr_byte_accessible(p)) return;
+    while (n < 160 && esp_ptr_byte_accessible(p + n) && p[n] >= 32 && p[n] < 127) {
+        buf[n] = p[n];
+        n++;
+    }
+    if (n < 6) return;   /* not a text */
+    buf[n] = 0;
+    esp_rom_printf("Task %u: text at a0: %s\n", pid, buf);
+}
+
+static bool cerberos_code_like(uint32_t v) {
+    if (v & 1) return false;
+    return (v >= 0x40000000u && v < 0x44000000u) ||   /* flash (firmware code) */
+           (v >= 0x48000000u && v < 0x4C000000u) ||   /* PSRAM (app code)      */
+           (v >= 0x4FF00000u && v < 0x4FFC0000u);     /* L2MEM (firmware IRAM) */
+}
+
+static void cerberos_print_stack(unsigned pid, uint32_t sp) {
+    uint32_t found[32];
+    int      count = 0;
+    for (int i = 0; i < 512 && count < 32; i++) {       /* 2 KB above sp */
+        uint32_t const *w = (uint32_t const *)(sp + 4u * (uint32_t)i);
+        if (!esp_ptr_byte_accessible(w) || !esp_ptr_byte_accessible((char const *)w + 3)) break;
+        if (cerberos_code_like(*w)) found[count++] = *w;
+    }
+    for (int i = 0; i < count; i += 8) {
+        esp_rom_printf("Task %u: stack", pid);
+        for (int j = i; j < i + 8 && j < count; j++) esp_rom_printf(" 0x%08x", (unsigned)found[j]);
+        esp_rom_printf("\n");
+    }
+}
+
 void IRAM_ATTR __wrap_xt_unhandled_exception(void *frame) {
     task_info_t *task_info = get_task_info();
     if (task_info && task_info->pid) {
@@ -335,6 +379,13 @@ void IRAM_ATTR __wrap_xt_unhandled_exception(void *frame) {
         esp_rom_printf("Task %u: a0 0x%08x a1 0x%08x a2 0x%08x a3 0x%08x s0 0x%08x s1 0x%08x\n", task_info->pid,
                        (unsigned)f->a0, (unsigned)f->a1, (unsigned)f->a2, (unsigned)f->a3, (unsigned)f->s0,
                        (unsigned)f->s1);
+        /* The app's load address, so its addresses can be mapped even when
+         * the "Start ELF file entrypoint" line is not in the log. */
+        esp_elf_t *elf = (esp_elf_t *)task_info->data;
+        if (elf && esp_ptr_byte_accessible(elf) && esp_ptr_byte_accessible(&elf->entry))
+            esp_rom_printf("Task %u: ELF entry 0x%08x\n", task_info->pid, (unsigned)(uintptr_t)elf->entry);
+        cerberos_print_text(task_info->pid, (uint32_t)f->a0);
+        cerberos_print_stack(task_info->pid, (uint32_t)f->sp);
 
         // Send task off to think about what it did until its timeslice runs out
         __asm__ volatile("csrw mepc, %0\n\t" // Set return address
