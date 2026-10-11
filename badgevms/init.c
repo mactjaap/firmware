@@ -403,11 +403,19 @@ void run_init(void) {
     printf("Entering main supervision loop...\n");
 
     time_t last_printed = time(NULL);
+    size_t last_tasks = (size_t)-1, last_psram = (size_t)-1, last_fb = (size_t)-1;
     while (1) {
         time_t current_time = time(NULL);
 
-        if (current_time - last_printed > 5) {
+        /* Mini Browser 4.5: print the status line only when the number of
+         * processes, PSRAM pages or framebuffer pages changed, and otherwise
+         * once a minute.  Every 6 s it landed in the middle of the lines an
+         * app writes (a long screenshot transfer over the serial port). */
+        size_t now_tasks = get_num_tasks(), now_psram = get_free_psram_pages(), now_fb = get_free_framebuffer_pages();
+        bool changed = now_tasks != last_tasks || now_psram != last_psram || now_fb != last_fb;
+        if ((changed && current_time - last_printed > 5) || current_time - last_printed >= 60) {
             size_t free_ram = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+            last_tasks = now_tasks; last_psram = now_psram; last_fb = now_fb;
             printf(
                 "Init: Free main memory: %zi, free PSRAM pages: %zi/%zi, free framebuffer pages: %zi/%zi running "
                 "processes %lu\n",
